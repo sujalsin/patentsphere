@@ -1,0 +1,14 @@
+pydantic>=2.4
+python-dotenv>=1.0
+PyYAML>=6.0
+sentence-transformers>=2.7
+torch>=2.2
+fastapi>=0.110
+uvicorn[standard]>=0.24
+qdrant-client>=1.8
+psycopg[binary]>=3.1
+pytest>=7.4
+google-cloud-bigquery>=3.14
+# Optional: for parallel embedding generation with PySpark
+# pyspark>=3.5
+

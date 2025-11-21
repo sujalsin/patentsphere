@@ -1,0 +1,124 @@
+# ============================================================================
+# PatentSphere - Docker Compose Configuration
+# Local Development Setup (Cost-Free)
+# ============================================================================
+
+version: '3.8'
+
+networks:
+  patentsphere-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  qdrant_storage:
+
+services:
+  # ============================================================================
+  # PostgreSQL Database
+  # Stores metadata, citations, litigation data, and RL experiences
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: patentsphere-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-patentsphere}
+      POSTGRES_USER: ${POSTGRES_USER:-patentuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-patentpass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      - patentsphere-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-patentuser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+
+  # ============================================================================
+  # Qdrant Vector Database
+  # Stores patent embeddings for semantic search
+  # ============================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: patentsphere-qdrant
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    ports:
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
+    networks:
+      - patentsphere-network
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+
+  # ============================================================================
+  # PatentSphere API (FastAPI)
+  # Main application server with multi-agent orchestrator
+  # NOTE: Uncomment when ready to run the API
+  # ============================================================================
+  # api:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: patentsphere-api
+  #   environment:
+  #     - POSTGRES_HOST=postgres
+  #     - POSTGRES_PORT=5432
+  #     - POSTGRES_DB=${POSTGRES_DB:-patentsphere}
+  #     - POSTGRES_USER=${POSTGRES_USER:-patentuser}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-patentpass}
+  #     - QDRANT_HOST=qdrant
+  #     - QDRANT_PORT=6333
+  #     - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+  #     - ENVIRONMENT=${ENVIRONMENT:-development}
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./models:/app/models
+  #     - ./logs:/app/logs
+  #   ports:
+  #     - "8000:8000"
+  #   networks:
+  #     - patentsphere-network
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     qdrant:
+  #       condition: service_healthy
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '2.0'
+  #         memory: 4G
+  #   command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# ============================================================================
+# Development Notes:
+# 
+# 1. Start services: docker-compose up -d postgres qdrant
+# 2. Run API locally (outside Docker) for faster development iteration
+# 3. Ollama should be installed and running on host machine
+# 4. This setup is FREE - no cloud costs!
+# 
+# Cost-Conscious Strategy:
+# - Days 1-12: Develop locally with this setup (FREE)
+# - Day 13-14: Deploy to GCP e2-medium ($0.03/hr) only for final demo
+# - Total GCP cost: ~$0.50 for 8 hours of demo time
+# ============================================================================

@@ -1,0 +1,2 @@
+# PatentSphere FastAPI app package
+

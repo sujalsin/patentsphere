@@ -1,0 +1,401 @@
+# PatentSphere Configuration
+# Main configuration file for the multi-agent RAG system
+
+# ============================================================================
+# APPLICATION SETTINGS
+# ============================================================================
+app:
+  name: "PatentSphere"
+  version: "1.0.0"
+  environment: "development"  # development, staging, production
+  profile: "local_dev"  # local_dev, gcp_free_tier, gcp_full
+  debug: true
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  
+# ============================================================================
+# API SERVER SETTINGS
+# ============================================================================
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  reload: true  # Auto-reload on code changes (dev only)
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8000"
+  
+# ============================================================================
+# DATABASE SETTINGS
+# ============================================================================
+database:
+  postgres:
+    host: "${POSTGRES_HOST:localhost}"
+    port: 5433
+    database: "${POSTGRES_DB:patentsphere}"
+    user: "${POSTGRES_USER:patentuser}"
+    password: "${POSTGRES_PASSWORD:patentpass}"
+    pool_size: 20
+    max_overflow: 10
+    echo: false  # SQL query logging
+    
+  qdrant:
+    host: "${QDRANT_HOST:localhost}"
+    port: 6333
+    grpc_port: 6334
+    api_key: "${QDRANT_API_KEY:}"
+    collection_name: "patents"
+    vector_size: 384  # all-MiniLM-L6-v2 embedding dimension
+    distance_metric: "Cosine"
+    on_disk: true  # Persist to disk
+    
+# ============================================================================
+# GOOGLE CLOUD PLATFORM SETTINGS
+# ============================================================================
+gcp:
+  project_id: "${GCP_PROJECT_ID:}"
+  bigquery:
+    dataset_id: "patents-public-data"
+    table_id: "patents.publications"
+    max_results: 1000000  # 1M patents
+    use_dry_run: true  # Avoid charges unless explicitly disabled
+    enabled: false  # Safeguard to keep BigQuery off until needed
+    credentials_path: "${GCP_CREDENTIALS_PATH:}"
+  
+  storage:
+    bucket_name: "${GCP_BUCKET_NAME:patentsphere-data}"
+  
+  compute:
+    vm_type: "e2-standard-4"  # Fits free-tier CPU quota
+    spot: true  # Prefer preemptible instances to save cost
+    auto_stop_hours: 4  # Shut down idle VM after N hours
+    boot_disk_gb: 100
+    region: "us-central1"
+  
+  budget:
+    credits_available_usd: 50
+    max_spend_usd: 10  # Hard stop to preserve credits
+    alert_threshold_usd: 5  # Notify before major spend
+    notifications_email: "${GCP_BUDGET_EMAIL:}"
+  
+  usage_policy:
+    free_tier_mode: true
+    require_manual_enable: true  # Prevent accidental cloud usage
+    allow_bigquery_exports: true
+    allow_vm_start: false
+    allow_storage_write: false
+    
+# ============================================================================
+# EMBEDDING MODEL SETTINGS
+# ============================================================================
+embeddings:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  dimension: 384
+  batch_size: 32
+  max_length: 512
+  device: "cpu"  # cpu, cuda, mps
+  normalize: true
+  
+# ============================================================================
+# LLM MODEL SETTINGS
+# ============================================================================
+llm:
+  # Ollama settings
+  ollama:
+    host: "${OLLAMA_HOST:http://localhost:11434}"
+    timeout: 120
+    
+  # Model configurations
+  models:
+    mistral:
+      name: "mistral:7b"
+      temperature: 0.3
+      top_p: 0.9
+      max_tokens: 2048
+      context_window: 8192
+      
+    llama3:
+      name: "llama3:8b"
+      temperature: 0.5
+      top_p: 0.85
+      max_tokens: 4096
+      context_window: 8192
+      
+  # Model assignments for agents
+  agent_models:
+    claims_analyzer: "mistral"
+    synthesis: "llama3"
+    critic: "llama3"
+    
+# ============================================================================
+# AGENT SETTINGS
+# ============================================================================
+agents:
+  # ClaimsAnalyzerAgent
+  claims_analyzer:
+    enabled: true
+    timeout: 30
+    max_retries: 3
+    cache_size: 100
+    
+  # CitationMapperAgent
+  citation_mapper:
+    enabled: true
+    timeout: 20
+    max_retries: 3
+    top_k: 50
+    hybrid_search_alpha: 0.7  # 0=keyword, 1=semantic
+    cpc_filter_enabled: true
+    
+  # LitigationScoutAgent
+  litigation_scout:
+    enabled: true
+    timeout: 15
+    max_retries: 3
+    min_confidence: 0.5
+    
+  # SynthesisAgent
+  synthesis:
+    enabled: true
+    timeout: 60
+    max_retries: 2
+    max_context_chunks: 30
+    citation_format: "numbered"  # numbered, inline, footnote
+    
+  # AdaptiveRetrievalAgent (RL)
+  adaptive_retrieval:
+    enabled: false  # Enable after baseline evaluation
+    timeout: 45
+    max_retries: 3
+    policy_path: "models/policy.pkl"
+    exploration_rate: 0.1  # Epsilon for epsilon-greedy
+    
+  # CriticAgent (RLAIF)
+  critic:
+    enabled: false  # Enable for RLAIF training
+    timeout: 30
+    reward_weights:
+      citation_overlap: 0.4
+      cpc_relevance: 0.3
+      temporal_diversity: 0.2
+      llm_fluency: 0.1
+    
+# ============================================================================
+# ORCHESTRATOR SETTINGS
+# ============================================================================
+orchestrator:
+  execution_mode: "parallel"  # parallel, sequential
+  max_concurrent_agents: 4
+  timeout: 120  # Overall query timeout in seconds
+  retry_failed_agents: true
+  aggregate_strategy: "weighted"  # weighted, majority, consensus
+  
+  # Agent weights for synthesis
+  agent_weights:
+    claims_analyzer: 0.25
+    citation_mapper: 0.40
+    litigation_scout: 0.15
+    synthesis: 0.20
+    
+# ============================================================================
+# REINFORCEMENT LEARNING SETTINGS
+# ============================================================================
+rl:
+  # Q-Learning parameters
+  q_learning:
+    learning_rate: 0.1
+    discount_factor: 0.95
+    exploration_rate: 0.2
+    exploration_decay: 0.995
+    min_exploration: 0.01
+    
+  # Training settings
+  training:
+    episodes: 1000
+    batch_size: 32
+    update_frequency: 10
+    save_frequency: 100
+    validation_split: 0.2
+    
+  # Action space
+  actions:
+    - "RETRIEVE"
+    - "RETRIEVE_MORE"
+    - "STOP"
+    
+  # State space (query type, current depth, reward history)
+  state_features:
+    - "query_type"
+    - "retrieval_depth"
+    - "cumulative_reward"
+    - "chunk_quality"
+    
+# ============================================================================
+# DATA PROCESSING SETTINGS
+# ============================================================================
+data:
+  # Patent chunking
+  chunking:
+    strategy: "fixed"  # fixed, semantic, hybrid
+    chunks_per_patent: 5  # title, abstract, 3 claims
+    max_chunk_length: 2000
+    overlap: 100
+    
+  # Citation graph
+  citations:
+    max_hops: 2
+    min_citations: 1
+    temporal_window_years: 15  # 2010-2024
+    
+  # CPC codes
+  cpc:
+    hierarchical_levels: 4  # G06N3/063 → G06N3/04 → G06N3/00 → G06N
+    similarity_threshold: 0.7
+  
+  subsets:
+    active: true
+    local_subset_path: "data/patents_50k.jsonl"
+    max_patents: 50000  # Stay within manageable local size
+    max_chunks: 250000
+    full_corpus_path: "gs://patentsphere-data/patents_1m.jsonl"
+    auto_download_full_corpus: false
+    
+# ============================================================================
+# EVALUATION SETTINGS
+# ============================================================================
+evaluation:
+  metrics:
+    # Primary metrics
+    - "citation_precision@10"
+    - "citation_recall@10"
+    - "latency_p50"
+    - "latency_p95"
+    - "reward_mean"
+    
+  # Test set
+  test_set_size: 100
+  baseline_test_size: 20
+  human_eval_size: 10
+  
+  # Statistical testing
+  significance_level: 0.05  # p < 0.05
+  paired_test: true
+  
+  # Targets
+  targets:
+    baseline_precision: 0.55
+    rlaif_precision: 0.72
+    latency_p50: 20  # seconds
+    latency_p95: 30  # seconds
+    human_quality_score: 4.0  # out of 5
+    
+# ============================================================================
+# LOGGING & MONITORING
+# ============================================================================
+logging:
+  # File logging
+  file:
+    enabled: true
+    path: "logs/patentsphere.log"
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+  # Console logging
+  console:
+    enabled: true
+    format: "%(levelname)s: %(message)s"
+    
+  # Structured logging (JSON)
+  json_logging: false
+  
+  # Telemetry
+  telemetry:
+    enabled: true
+    backend: "postgresql"  # postgresql, prometheus, jaeger
+    sample_rate: 1.0  # 0.0 to 1.0
+    
+# ============================================================================
+# CACHING SETTINGS
+# ============================================================================
+cache:
+  enabled: true
+  backend: "memory"  # memory, redis
+  ttl: 3600  # Time to live in seconds
+  max_size: 1000  # Max number of cached items
+  
+  redis:
+    host: "${REDIS_HOST:localhost}"
+    port: 6379
+    db: 0
+    password: "${REDIS_PASSWORD:}"
+    
+# ============================================================================
+# SECURITY SETTINGS
+# ============================================================================
+security:
+  api_key_enabled: false
+  api_key: "${API_KEY:}"
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+    
+# ============================================================================
+# DEPLOYMENT SETTINGS
+# ============================================================================
+deployment:
+  docker:
+    compose_version: "3.8"
+    network_name: "patentsphere-network"
+    
+  resources:
+    patents_api:
+      cpus: "1.0"
+      memory: "2G"
+    qdrant:
+      cpus: "0.5"
+      memory: "1G"
+    postgres:
+      cpus: "0.5"
+      memory: "1G"
+    critic:
+      cpus: "0.5"
+      memory: "1G"
+    rl_trainer:
+      cpus: "0.5"
+      memory: "1G"
+
+# ============================================================================
+# RESOURCE SAFEGUARDS
+# ============================================================================
+resource_policy:
+  # Controls which services are allowed to run in each profile
+  profiles:
+    local_dev:
+      enable_adaptive_retrieval: false
+      enable_critic: false
+      max_parallel_agents: 2
+      use_local_qdrant: true
+      use_local_postgres: true
+      use_remote_llm: false
+      dataset: "subsets.local_subset_path"
+    gcp_free_tier:
+      enable_adaptive_retrieval: true
+      enable_critic: true
+      max_parallel_agents: 4
+      use_local_qdrant: false
+      use_local_postgres: false
+      use_remote_llm: true
+      dataset: "full_corpus_path"
+    gcp_full:
+      enable_adaptive_retrieval: true
+      enable_critic: true
+      max_parallel_agents: 8
+      use_local_qdrant: false
+      use_local_postgres: false
+      use_remote_llm: true
+      dataset: "full_corpus_path"
+  
+  # Manual switches for cloud resources
+  require_manual_cloud_enable: true
+  fail_if_gcp_usage_without_flag: true

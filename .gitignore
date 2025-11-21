@@ -1,0 +1,119 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Data - exclude all data files in root data/ directory
+/data/
+# But allow test fixtures and evaluation queries
+!tests/data/
+!evaluation/data/
+# Exclude data files
+*.jsonl
+*.parquet
+*.csv
+# But allow test and evaluation data files
+!tests/data/*.jsonl
+!evaluation/data/*.json
+
+# Models and embeddings
+models/
+*.pkl
+*.pt
+*.pth
+*.bin
+*.ckpt
+# Embeddings are data, not models
+data/**/*.pt
+data/**/embeddings.pt
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Qdrant storage
+qdrant_storage/
+storage/
+
+# Docker
+docker-compose.override.yml
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation
+docs/_build/
+
+# Credentials and secrets
+*.json
+!config/*.json
+!evaluation/data/*.json
+!tests/data/*.json
+credentials/
+secrets/
+*.key
+*.pem
+*_credentials.json
+*_service_account.json
+GOOGLE_APPLICATION_CREDENTIALS
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
