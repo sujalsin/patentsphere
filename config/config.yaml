@@ -53,13 +53,16 @@ database:
 # ============================================================================
 gcp:
   project_id: "${GCP_PROJECT_ID:}"
+  credentials_path: "${GCP_CREDENTIALS_PATH:./patentsphere.json}"
   bigquery:
     dataset_id: "patents-public-data"
     table_id: "patents.publications"
     max_results: 1000000  # 1M patents
     use_dry_run: true  # Avoid charges unless explicitly disabled
     enabled: false  # Safeguard to keep BigQuery off until needed
-    credentials_path: "${GCP_CREDENTIALS_PATH:}"
+    # USPTO OCE Litigation dataset
+    litigation_dataset: "uspto_oce_litigation"
+    litigation_table: "litigation_data"  # Will be verified via research script
   
   storage:
     bucket_name: "${GCP_BUCKET_NAME:patentsphere-data}"
@@ -102,7 +105,7 @@ llm:
   # Ollama settings
   ollama:
     host: "${OLLAMA_HOST:http://localhost:11434}"
-    timeout: 120
+    timeout: 300  # Increased to 5 minutes for model loading and long responses
     
   # Model configurations
   models:
@@ -171,7 +174,7 @@ agents:
     
   # CriticAgent (RLAIF)
   critic:
-    enabled: false  # Enable for RLAIF training
+    enabled: true  # Enable for RLAIF training
     timeout: 30
     reward_weights:
       citation_overlap: 0.4

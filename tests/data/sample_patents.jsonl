@@ -1,3 +1,4 @@
 {"publication_number": "US1000001A", "title": "Sample widget", "abstract": "A widget for testing.", "claims": ["First claim text", "Second claim text"], "filing_date": "2018-02-01", "cpc_codes": ["G06F17/30"]}
 {"publication_number": "US1000002B", "title": "Sample gizmo", "abstract": "A gizmo for testing.", "claims": ["Claim A"], "filing_date": "2019-03-15", "cpc_codes": ["H04L29/06"]}
 
+

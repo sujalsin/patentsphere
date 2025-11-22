@@ -26,3 +26,4 @@ class AdaptiveRetrievalAgent:
         current = self.q_table[state][action]
         self.q_table[state][action] = current + alpha * (reward + gamma * best_next - current)
 
+

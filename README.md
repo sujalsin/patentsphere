@@ -148,6 +148,107 @@ Endpoints (GET):
 
 All endpoints inherit the runtime guard: if the profile isn’t `local_dev`, they raise until we explicitly enable cloud usage.
 
+### Claims Analyzer LLM Setup
+
+The `ClaimsAnalyzerAgent` now calls an Ollama-hosted Mistral model to extract CPC codes and technical features.
+
+1. Install [Ollama](https://ollama.ai) locally and pull the model listed in `config/config.yaml` (default `mistral:7b`):
+   ```bash
+   ollama pull mistral:7b
+   ```
+2. Ensure the Ollama service is running (default `http://localhost:11434`). Override via `export OLLAMA_HOST=http://host.docker.internal:11434` when the API runs inside Docker.
+3. Optional: map alternate models per profile by editing `llm.agent_models.claims_analyzer` and the corresponding block under `llm.models`.
+
+Each ClaimsAnalyzer run logs its output (CPC predictions, feature bullets, assumptions) to the `query_claims_analysis` table in Postgres for downstream agents (Synthesis, Critic, RL). If the LLM is unavailable, the agent falls back to a keyword-based heuristic and still records the attempt with `used_fallback=true`.
+
+### Synthesis Agent LLM Setup
+
+The `SynthesisAgent` consumes all upstream agent outputs and generates an executive summary/action plan via the `llm.agent_models.synthesis` model (default `llama3:8b` in `config/config.yaml`). Configuration steps mirror the claims agent:
+
+1. `ollama pull llama3:8b` (or whichever model name you assign under `llm.models`).
+2. Ensure the service is reachable at the host configured in `OLLAMA_HOST`.
+3. Run `/query`—the response now includes:
+   - `executive_summary`
+   - `action_items` with priority/recommendation/rationale
+   - Structured `citations`, `risk_score`, and `notes`
+
+When the LLM fails, the agent falls back to a claims-only summary and flags `source=heuristic` so the frontend and Critic can detect degraded runs.
+
+## Litigation Data Setup
+
+### BigQuery Credentials
+
+1. Create a GCP service account with BigQuery access:
+   - Go to [GCP Console](https://console.cloud.google.com/iam-admin/serviceaccounts)
+   - Create a new service account
+   - Grant roles: "BigQuery Data Viewer" and "BigQuery Job User"
+   - Download JSON key file
+   - Save as `patentsphere.json` in project root
+
+2. Set environment variable (optional):
+   ```bash
+   export GCP_CREDENTIALS_PATH=./patentsphere.json
+   export GCP_PROJECT_ID=your-project-id
+   ```
+
+### Research USPTO Litigation Schema
+
+Explore the USPTO OCE litigation dataset structure:
+
+```bash
+python scripts/research_litigation_schema.py --dataset uspto_oce_litigation
+```
+
+This will show available tables, schemas, and cost estimates.
+
+### Fetch Litigation Data
+
+1. Run dry-run to estimate costs:
+   ```bash
+   export GCP_ALLOW_BIGQUERY_EXPORTS=true
+   python scripts/fetch_litigation_data.py --use-db-patents
+   ```
+
+2. Execute the query (when ready):
+   ```bash
+   python scripts/fetch_litigation_data.py \
+     --use-db-patents \
+     --output data/litigation_data.jsonl \
+     --execute
+   ```
+
+3. Load litigation data into PostgreSQL:
+   ```bash
+   python scripts/ingest_local.py \
+     --chunks data/processed/chunks.jsonl \
+     --embeddings data/processed/embeddings.pt \
+     --citations data/citations.jsonl \
+     --litigation data/litigation_data.jsonl
+   ```
+
+## End-to-End Testing
+
+Run comprehensive end-to-end tests:
+
+```bash
+# Start services
+docker compose up -d postgres qdrant
+
+# Run test suite
+python scripts/test_fastapi_endtoend.py
+
+# Or test specific components
+python scripts/test_fastapi_endtoend.py --skip-docker  # If services already running
+python scripts/test_fastapi_endtoend.py --skip-api    # Test orchestrator only
+```
+
+The test suite verifies:
+- Docker services (PostgreSQL, Qdrant)
+- Database connectivity and data loading
+- All FastAPI endpoints (`/health`, `/whoami`, `/retrieve`, `/query`)
+- All agents (ClaimsAnalyzer, CitationMapper, LitigationScout, Synthesis, CriticAgent)
+- Response times and error handling
+
 ## Next Steps
 
 The next milestone is wiring the processed chunks and embeddings into Qdrant + PostgreSQL (Week 1 Days 2–3) while honoring the cost guardrails defined in `config/config.yaml`. See `docs/proposal.md` for the full two-week plan.

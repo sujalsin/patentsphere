@@ -117,3 +117,6 @@ temp/
 .DS_Store
 .AppleDouble
 .LSOverride
+*.jsonl
+*.json
+*.md

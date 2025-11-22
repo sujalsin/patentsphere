@@ -48,24 +48,44 @@ class CitationMapperAgent(BaseAgent):
                 normalize_embeddings=True,
             ).tolist()
             
-            # Search Qdrant
-            search_results = self.qdrant_client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=self.top_k,
-            )
+            # Search Qdrant (using query_points for newer API)
+            try:
+                # Try newer API first (qdrant-client >= 1.7.0)
+                search_response = self.qdrant_client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    limit=self.top_k,
+                )
+                search_results = search_response.points
+            except (AttributeError, TypeError):
+                # Fallback to older API (qdrant-client < 1.7.0)
+                search_results = self.qdrant_client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=self.top_k,
+                )
             
             # Format results
-            results: List[Dict[str, Any]] = [
-                {
-                    "patent_id": hit.payload.get("patent_id", ""),
-                    "chunk_id": str(hit.id),
-                    "score": float(hit.score),
-                    "chunk_type": hit.payload.get("chunk_type", ""),
-                    "chunk_text": hit.payload.get("chunk_text", "")[:200],  # Preview
-                }
-                for hit in search_results
-            ]
+            results: List[Dict[str, Any]] = []
+            for hit in search_results:
+                # Handle both new API (ScoredPoint) and old API (Point) formats
+                if hasattr(hit, 'payload'):
+                    payload = hit.payload
+                    point_id = hit.id
+                    score = getattr(hit, 'score', 0.0)
+                else:
+                    # Old API format
+                    payload = hit.get('payload', {}) if isinstance(hit, dict) else {}
+                    point_id = hit.get('id', '')
+                    score = hit.get('score', 0.0)
+                
+                results.append({
+                    "patent_id": payload.get("patent_id", "") if isinstance(payload, dict) else "",
+                    "chunk_id": str(point_id),
+                    "score": float(score),
+                    "chunk_type": payload.get("chunk_type", "") if isinstance(payload, dict) else "",
+                    "chunk_text": (payload.get("chunk_text", "")[:200] if isinstance(payload, dict) else "")[:200],  # Preview
+                })
             
             return AgentResult(agent=self.name, success=True, data={"results": results})
         except Exception as exc:

@@ -97,6 +97,12 @@ class CitationMapperConfig(AgentConfig):
     cpc_filter_enabled: bool = True
 
 
+class LitigationScoutConfig(AgentConfig):
+    """LitigationScoutAgent specific configuration."""
+    risk_threshold: int = 3  # High risk if 3+ cases per patent
+    recent_years: int = 2     # Recent = last 2 years
+
+
 class CriticConfig(AgentConfig):
     """CriticAgent specific configuration."""
     reward_weights: Dict[str, float] = {
@@ -176,7 +182,7 @@ class Settings(BaseModel):
     # Agent configurations
     claims_analyzer: AgentConfig = AgentConfig()
     citation_mapper: CitationMapperConfig = CitationMapperConfig()
-    litigation_scout: AgentConfig = AgentConfig()
+    litigation_scout: LitigationScoutConfig = LitigationScoutConfig()
     synthesis: AgentConfig = AgentConfig(timeout=60, max_retries=2)
     adaptive_retrieval: AdaptiveRetrievalConfig = AdaptiveRetrievalConfig(enabled=False)
     critic: CriticConfig = CriticConfig(enabled=False)
@@ -279,7 +285,7 @@ def create_settings_from_yaml(yaml_config: Dict[str, Any]) -> Settings:
         evaluation=EvaluationConfig(**eval_config),
         claims_analyzer=AgentConfig(**agents_config.get('claims_analyzer', {})),
         citation_mapper=CitationMapperConfig(**agents_config.get('citation_mapper', {})),
-        litigation_scout=AgentConfig(**agents_config.get('litigation_scout', {})),
+        litigation_scout=LitigationScoutConfig(**agents_config.get('litigation_scout', {})),
         synthesis=AgentConfig(**agents_config.get('synthesis', {})),
         adaptive_retrieval=AdaptiveRetrievalConfig(**agents_config.get('adaptive_retrieval', {})),
         critic=CriticConfig(**agents_config.get('critic', {}))

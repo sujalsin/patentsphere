@@ -52,6 +52,18 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Batch size for Qdrant upserts.",
     )
+    parser.add_argument(
+        "--citations",
+        type=str,
+        default=None,
+        help="Path to citations JSONL file (optional).",
+    )
+    parser.add_argument(
+        "--litigation",
+        type=str,
+        default=None,
+        help="Path to litigation JSONL file (optional).",
+    )
     return parser.parse_args()
 
 
@@ -79,6 +91,29 @@ def ensure_postgres_tables(conn) -> None:
                 publication_date DATE,
                 cpc_codes JSONB
             )
+            """
+        )
+        # Create patent_citations table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patent_citations (
+                id SERIAL PRIMARY KEY,
+                citing_patent_id TEXT NOT NULL,
+                cited_patent_id TEXT NOT NULL,
+                citation_type TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(citing_patent_id, cited_patent_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_citing_patent ON patent_citations(citing_patent_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cited_patent ON patent_citations(cited_patent_id)
             """
         )
         conn.commit()
@@ -208,6 +243,207 @@ def upsert_qdrant(
         client.upsert(collection_name=collection, points=points)
 
 
+def load_citation_graph(citations_path: Path) -> List[Tuple[str, str, str]]:
+    """Load citation pairs from JSONL file."""
+    citations = []
+    with citations_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                citing = record.get("citing_patent")
+                cited = record.get("cited_patent")
+                ctype = record.get("type", "UNKNOWN")
+                if citing and cited:
+                    citations.append((citing, cited, ctype))
+            except json.JSONDecodeError:
+                continue
+    return citations
+
+
+def upsert_citations(conn, citations: List[Tuple[str, str, str]]) -> None:
+    """Bulk insert citation pairs into patent_citations table."""
+    if not citations:
+        return
+    
+    with conn.cursor() as cur:
+        # Use executemany for bulk insert
+        cur.executemany(
+            """
+            INSERT INTO patent_citations (citing_patent_id, cited_patent_id, citation_type)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (citing_patent_id, cited_patent_id) DO NOTHING
+            """,
+            citations,
+        )
+        conn.commit()
+
+
+def ensure_rl_tables(conn) -> None:
+    """Create RL experiences table for logging rewards."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rl_experiences (
+                id SERIAL PRIMARY KEY,
+                query_text TEXT NOT NULL,
+                query_type TEXT,
+                retrieved_patent_ids TEXT[],
+                total_reward DOUBLE PRECISION,
+                reward_components JSONB,
+                agent_outputs JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_type ON rl_experiences(query_type)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_created_at ON rl_experiences(created_at)
+            """
+        )
+        conn.commit()
+
+
+def ensure_litigation_tables(conn) -> None:
+    """Create patent_litigation table for storing litigation data."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patent_litigation (
+                id SERIAL PRIMARY KEY,
+                patent_id TEXT,
+                case_number TEXT NOT NULL,
+                court_name TEXT,
+                filing_date DATE,
+                case_status TEXT,
+                outcome TEXT,
+                plaintiff_name TEXT,
+                defendant_name TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(patent_id, case_number)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_patent_litigation_patent ON patent_litigation(patent_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_patent_litigation_case ON patent_litigation(case_number)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_patent_litigation_date ON patent_litigation(filing_date)
+            """
+        )
+        conn.commit()
+
+
+def load_litigation_data(litigation_path: Path) -> List[Dict]:
+    """Load litigation records from JSONL file."""
+    records = []
+    with litigation_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                records.append(record)
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def upsert_litigation(conn, litigation_records: List[Dict]) -> None:
+    """Bulk insert litigation records into patent_litigation table."""
+    if not litigation_records:
+        return
+    
+    processed_records = []
+    for record in litigation_records:
+        # Normalize patent_id - try multiple sources
+        patent_id = record.get("patent_id") or record.get("patent_number", "")
+        
+        # If no patent_id, try to extract from case_name
+        if not patent_id or patent_id == "None":
+            case_name = record.get("case_name", "")
+            if case_name:
+                import re
+                # Try to find patent numbers in case name
+                found_patents = re.findall(
+                    r'\b(US|EP|WO|JP|CN|KR|GB|DE|FR)[- ]?(\d+)[A-Z]?(\d*)\b',
+                    case_name,
+                    re.IGNORECASE
+                )
+                if found_patents:
+                    # Use first found patent
+                    country, num1, num2 = found_patents[0]
+                    patent_id = f"{country.upper()}-{num1}{num2}"
+        
+        # Allow NULL patent_id - we can still store cases and match them later
+        # Set to None if not found
+        if not patent_id or patent_id == "None":
+            patent_id = None
+        
+        # Convert filing_date if needed
+        filing_date = record.get("filing_date")
+        if filing_date and isinstance(filing_date, str):
+            # Try to parse date string
+            try:
+                from datetime import datetime
+                filing_date = datetime.strptime(filing_date[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                filing_date = None
+        
+        processed_records.append({
+            "patent_id": patent_id,
+            "case_number": record.get("case_number", ""),
+            "court_name": record.get("court_name"),
+            "filing_date": filing_date,
+            "case_status": record.get("case_status"),
+            "outcome": record.get("outcome"),
+            "plaintiff_name": record.get("plaintiff_name"),
+            "defendant_name": record.get("defendant_name"),
+        })
+    
+    if not processed_records:
+        return
+    
+    with conn.cursor() as cur:
+            # Use case_number as unique identifier (patent_id can be NULL)
+            cur.executemany(
+                """
+                INSERT INTO patent_litigation (
+                    patent_id, case_number, court_name, filing_date,
+                    case_status, outcome, plaintiff_name, defendant_name
+                )
+                VALUES (%(patent_id)s, %(case_number)s, %(court_name)s, %(filing_date)s,
+                        %(case_status)s, %(outcome)s, %(plaintiff_name)s, %(defendant_name)s)
+                ON CONFLICT (case_number) DO UPDATE SET
+                    patent_id = EXCLUDED.patent_id,
+                    court_name = EXCLUDED.court_name,
+                    filing_date = EXCLUDED.filing_date,
+                    case_status = EXCLUDED.case_status,
+                    outcome = EXCLUDED.outcome,
+                    plaintiff_name = EXCLUDED.plaintiff_name,
+                    defendant_name = EXCLUDED.defendant_name
+                """,
+                processed_records,
+            )
+            conn.commit()
+
+
 def main() -> None:
     args = parse_args()
     rp = get_runtime_profile()
@@ -228,7 +464,38 @@ def main() -> None:
     conn_str = f"postgresql://{pg_cfg.user}:{pg_cfg.password}@{pg_cfg.host}:{pg_cfg.port}/{pg_cfg.database}"
     conn = psycopg.connect(conn_str, row_factory=dict_row)
     ensure_postgres_tables(conn)
+    ensure_rl_tables(conn)
+    ensure_litigation_tables(conn)
     upsert_postgres(conn, chunks)
+    
+    # Load citations if provided
+    if args.citations:
+        citations_path = Path(args.citations)
+        if citations_path.exists():
+            print(f"Loading citations from: {citations_path}")
+            citations = load_citation_graph(citations_path)
+            if citations:
+                upsert_citations(conn, citations)
+                print(f"✓ Loaded {len(citations)} citation pairs")
+            else:
+                print("No citations found in file")
+        else:
+            print(f"Warning: Citations file not found: {citations_path}")
+    
+    # Load litigation if provided
+    if args.litigation:
+        litigation_path = Path(args.litigation)
+        if litigation_path.exists():
+            print(f"Loading litigation data from: {litigation_path}")
+            litigation_records = load_litigation_data(litigation_path)
+            if litigation_records:
+                upsert_litigation(conn, litigation_records)
+                print(f"✓ Loaded {len(litigation_records)} litigation records")
+            else:
+                print("No litigation records found in file")
+        else:
+            print(f"Warning: Litigation file not found: {litigation_path}")
+    
     conn.close()
     print("Postgres ingestion complete.")
 

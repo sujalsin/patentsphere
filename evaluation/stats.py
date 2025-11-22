@@ -12,3 +12,4 @@ def paired_t_test(baseline_path: Path, rlaif_path: Path):
     t_stat, p_val = ttest_rel(baseline, rlaif)
     return {"t_stat": t_stat, "p_value": p_val}
 
+
