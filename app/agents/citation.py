@@ -23,9 +23,18 @@ class CitationMapperAgent(BaseAgent):
             )
             self.collection_name = qdrant_cfg.collection_name
             # Load embedding model for query encoding
+            # Auto-detect device if "auto" is specified
+            device = settings.embeddings.device
+            if device == "auto":
+                try:
+                    import torch
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            
             self.embedding_model = SentenceTransformer(
                 settings.embeddings.model_name,
-                device=settings.embeddings.device,
+                device=device,
             )
             self.top_k = settings.citation_mapper.top_k
         else:

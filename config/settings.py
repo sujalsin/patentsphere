@@ -141,6 +141,41 @@ class RLConfig(BaseModel):
     actions: List[str] = ["RETRIEVE", "RETRIEVE_MORE", "STOP"]
 
 
+class ChunkingConfig(BaseModel):
+    """Chunking strategy configuration for patent preprocessing."""
+    strategy: str = "full_text"
+    chunk_size: int = 2000
+    overlap: int = 200
+    max_chunks_per_patent: Optional[int] = None
+    fields: List[str] = [
+        "title",
+        "abstract",
+        "description",
+        "background",
+        "summary",
+        "claims",
+        "drawings",
+    ]
+
+
+class DataSubsetConfig(BaseModel):
+    """Controls which dataset slices are processed locally."""
+    active: bool = True
+    local_subset_path: str = "data/patents_50k.jsonl"
+    max_patents: int = 50000
+    max_chunks: int = 250000
+    full_corpus_path: str = "gs://patentsphere-data/patents_1m.jsonl"
+    auto_download_full_corpus: bool = False
+
+
+class DataSettings(BaseModel):
+    """Aggregate data/preprocessing settings."""
+    chunking: ChunkingConfig = ChunkingConfig()
+    subsets: DataSubsetConfig = DataSubsetConfig()
+    citations: Dict[str, Any] = {}
+    cpc: Dict[str, Any] = {}
+
+
 class EvaluationConfig(BaseModel):
     """Evaluation configuration."""
     metrics: List[str] = []
@@ -178,6 +213,7 @@ class Settings(BaseModel):
     orchestrator: OrchestratorConfig
     rl: RLConfig
     evaluation: EvaluationConfig
+    data: DataSettings = DataSettings()
     
     # Agent configurations
     claims_analyzer: AgentConfig = AgentConfig()
@@ -254,6 +290,8 @@ def create_settings_from_yaml(yaml_config: Dict[str, Any]) -> Settings:
     # Extract agent configs
     agents_config = yaml_config.get('agents', {})
     
+    data_config = yaml_config.get("data", {})
+
     # Build Settings object
     return Settings(
         app_name=yaml_config.get('app', {}).get('name', 'PatentSphere'),
@@ -283,6 +321,12 @@ def create_settings_from_yaml(yaml_config: Dict[str, Any]) -> Settings:
         orchestrator=OrchestratorConfig(**orchestrator_config),
         rl=RLConfig(**rl_config),
         evaluation=EvaluationConfig(**eval_config),
+        data=DataSettings(
+            chunking=ChunkingConfig(**data_config.get("chunking", {})),
+            subsets=DataSubsetConfig(**data_config.get("subsets", {})),
+            citations=data_config.get("citations", {}),
+            cpc=data_config.get("cpc", {}),
+        ),
         claims_analyzer=AgentConfig(**agents_config.get('claims_analyzer', {})),
         citation_mapper=CitationMapperConfig(**agents_config.get('citation_mapper', {})),
         litigation_scout=LitigationScoutConfig(**agents_config.get('litigation_scout', {})),

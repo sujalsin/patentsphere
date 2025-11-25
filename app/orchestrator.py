@@ -14,6 +14,7 @@ from app.agents.citation import CitationMapperAgent
 from app.agents.critic import CriticAgent
 from app.agents.litigation import LitigationScoutAgent
 from app.agents.synthesis import SynthesisAgent
+from app.agents.adaptive_retrieval import AdaptiveRetrievalAgent
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,14 @@ class Orchestrator:
             "litigation_scout": LitigationScoutAgent(settings=settings),  # Alias for compatibility
             "synthesis": SynthesisAgent(settings=settings),
         }
+        
+        # Add AdaptiveRetrievalAgent if enabled in config
+        if settings.adaptive_retrieval.enabled:
+            self.agents["adaptive_retrieval"] = AdaptiveRetrievalAgent(settings=settings)
+        
+        # Add AdaptiveRetrievalAgent if enabled in config
+        if settings.adaptive_retrieval.enabled:
+            self.agents["adaptive_retrieval"] = AdaptiveRetrievalAgent(settings=settings)
         
         # Add CriticAgent if enabled in config
         if settings.critic.enabled:
@@ -60,10 +69,18 @@ class Orchestrator:
 
         # Run non-synthesis and non-critic agents in parallel to build context
         # Exclude duplicates (citation_mapper, litigation_scout are aliases)
-        parallel_agents = {
-            name: agent for name, agent in self.agents.items() 
-            if name not in ("synthesis", "critic", "citation_mapper", "litigation_scout")
-        }
+        # If AdaptiveRetrievalAgent is enabled, it will replace CitationMapperAgent
+        settings = get_settings()
+        adaptive_enabled = settings.adaptive_retrieval.enabled if hasattr(settings, 'adaptive_retrieval') else False
+        
+        parallel_agents = {}
+        for name, agent in self.agents.items():
+            if name in ("synthesis", "critic", "citation_mapper", "litigation_scout"):
+                continue
+            # If adaptive_retrieval is enabled, skip citation (it will be handled by adaptive)
+            if adaptive_enabled and name == "citation":
+                continue
+            parallel_agents[name] = agent
         
         # Add timeouts to prevent hanging
         settings = get_settings()
@@ -108,6 +125,79 @@ class Orchestrator:
         results = processed_results
         context = {res.agent: res.data for res in results if res.success}
         self.latest_context = context
+        
+        # Run AdaptiveRetrievalAgent if enabled (replaces CitationMapperAgent)
+        adaptive_agent = self.agents.get("adaptive_retrieval")
+        if adaptive_enabled and adaptive_agent:
+            try:
+                # Get query_type from claims_analyzer
+                claims_data = context.get("claims_analyzer", {})
+                query_type = claims_data.get("query_type", "other")
+                
+                # Run adaptive retrieval
+                adaptive_result = await asyncio.wait_for(
+                    adaptive_agent.run(query=query, query_type=query_type),
+                    timeout=agent_timeout
+                )
+                
+                if adaptive_result.success:
+                    # Store adaptive retrieval results
+                    context["adaptive_retrieval"] = adaptive_result.data
+                    context["citation_mapper"] = adaptive_result.data  # For compatibility
+                    
+                    # Update results list - replace citation if exists, otherwise append
+                    citation_found = False
+                    for i, res in enumerate(results):
+                        if res.agent == "citation":
+                            results[i] = adaptive_result
+                            citation_found = True
+                            break
+                    if not citation_found:
+                        results.append(adaptive_result)
+                else:
+                    logger.warning("AdaptiveRetrievalAgent failed, falling back to CitationMapperAgent: %s", adaptive_result.error)
+                    # Fallback to regular citation mapper
+                    citation_agent = self.agents.get("citation")
+                    if citation_agent:
+                        citation_result = await asyncio.wait_for(
+                            citation_agent.run(query),
+                            timeout=agent_timeout
+                        )
+                        if citation_result.success:
+                            context["citation_mapper"] = citation_result.data
+                            # Update or add citation result
+                            citation_found = False
+                            for i, res in enumerate(results):
+                                if res.agent == "citation":
+                                    results[i] = citation_result
+                                    citation_found = True
+                                    break
+                            if not citation_found:
+                                results.append(citation_result)
+            except asyncio.TimeoutError:
+                logger.warning("AdaptiveRetrievalAgent timed out, falling back to CitationMapperAgent")
+                # Fallback
+                citation_agent = self.agents.get("citation")
+                if citation_agent:
+                    citation_result = await asyncio.wait_for(
+                        citation_agent.run(query),
+                        timeout=agent_timeout
+                    )
+                    if citation_result.success:
+                        context["citation_mapper"] = citation_result.data
+                        results.append(citation_result)
+            except Exception as exc:
+                logger.warning("AdaptiveRetrievalAgent error: %s, falling back", exc)
+                # Fallback
+                citation_agent = self.agents.get("citation")
+                if citation_agent:
+                    citation_result = await asyncio.wait_for(
+                        citation_agent.run(query),
+                        timeout=agent_timeout
+                    )
+                    if citation_result.success:
+                        context["citation_mapper"] = citation_result.data
+                        results.append(citation_result)
         
         # Pass retrieved patent IDs to LitigationScoutAgent if available
         litigation_agent = self.agents.get("litigation")

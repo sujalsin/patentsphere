@@ -3,7 +3,8 @@
 PatentSphere preprocessing script.
 
 Goals:
-- Chunk raw Google Patents JSONL data into fixed units (title, abstract, claims).
+- Chunk raw Google Patents JSONL data into token-aware sections covering the
+  entire patent (title, abstract, description, all claims, etc.).
 - (Optionally) generate sentence-transformer embeddings for each chunk.
 - Persist outputs locally so we can stay within the free tier until GCP is explicitly enabled.
 
@@ -28,7 +29,7 @@ import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -41,13 +42,33 @@ from config.settings import get_settings  # type: ignore  # noqa
 DEFAULT_OUTPUT_DIR = Path("data/processed")
 
 
+TEXTUAL_FIELD_CANDIDATES: Tuple[str, ...] = (
+    "title",
+    "abstract",
+    "description",
+    "background",
+    "summary",
+    "detailed_description",
+    "claims",
+    "drawings",
+)
+
+NON_TEXTUAL_FIELDS = {
+    "publication_number",
+    "filing_date",
+    "application_number",
+    "cpc_codes",
+    "citations",
+}
+
+
 @dataclass
 class Chunk:
     """Represents a single chunk ready for embedding + Qdrant ingestion."""
 
     chunk_id: str
     patent_id: str
-    chunk_type: str  # title | abstract | claim
+    chunk_type: str
     text: str
     order: int
     publication_date: Optional[str] = None
@@ -57,6 +78,13 @@ class Chunk:
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     rp = get_runtime_profile()
+    chunking_cfg = getattr(getattr(settings, "data", None), "chunking", None)
+    default_chunk_limit = getattr(chunking_cfg, "max_chunks_per_patent", 0) or 0
+    default_chunk_size = getattr(chunking_cfg, "chunk_size", 2000)
+    default_chunk_overlap = getattr(chunking_cfg, "overlap", 200)
+    default_chunk_fields: Sequence[str] = getattr(
+        chunking_cfg, "fields", TEXTUAL_FIELD_CANDIDATES
+    )
 
     parser = argparse.ArgumentParser(description="Process patent JSONL into chunks.")
     parser.add_argument(
@@ -80,10 +108,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunks-per-patent",
         type=int,
-        default=settings.data.chunking.chunks_per_patent
-        if hasattr(settings, "data")
-        else 5,
-        help="Maximum chunks per patent.",
+        default=default_chunk_limit,
+        help=(
+            "Hard cap on chunks per patent (0 for unlimited). "
+            "Use to guard against runaway long claims."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=default_chunk_size,
+        help="Target number of tokens (word splits) per chunk.",
+    )
+    parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=default_chunk_overlap,
+        help="Token overlap between consecutive chunks.",
+    )
+    parser.add_argument(
+        "--chunk-fields",
+        type=str,
+        default=",".join(default_chunk_fields),
+        help=(
+            "Comma-separated list of JSON fields to include (order matters). "
+            "Available defaults: title, abstract, description, summary, claims, drawings."
+        ),
     )
     parser.add_argument(
         "--generate-embeddings",
@@ -161,43 +211,142 @@ def iter_patents(path: Path, max_patents: int) -> Iterable[Dict]:
                 print(f"[WARN] Skipping malformed line {idx}: {exc}", file=sys.stderr)
 
 
+def _normalize_text(value: str) -> str:
+    """Collapse whitespace for more stable chunk sizing."""
+    return " ".join(value.split())
+
+
+def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """Split text into overlapping chunks measured in words."""
+    words = text.split()
+    if not words:
+        return []
+
+    chunk_size = max(chunk_size, 1)
+    overlap = max(overlap, 0)
+    if chunk_size <= overlap:
+        raise ValueError("chunk_size must be greater than chunk_overlap.")
+
+    chunks: List[str] = []
+    start = 0
+    total = len(words)
+    while start < total:
+        end = min(total, start + chunk_size)
+        chunk_words = words[start:end]
+        chunks.append(" ".join(chunk_words))
+        if end >= total:
+            break
+        start = end - overlap
+    return chunks
+
+
+def _append_section(
+    sections: List[Tuple[str, str]],
+    field_name: str,
+    value: object,
+) -> None:
+    """Recursively append textual content with normalized names."""
+
+    if value is None:
+        return
+
+    if isinstance(value, str):
+        normalized = _normalize_text(value)
+        if normalized:
+            sections.append((field_name, normalized))
+        return
+
+    if isinstance(value, list):
+        for idx, item in enumerate(value, start=1):
+            next_name = field_name if field_name.startswith("claim_") else f"{field_name}_{idx}"
+            _append_section(sections, next_name, item)
+        return
+
+    if isinstance(value, dict):
+        for sub_key, sub_val in value.items():
+            next_name = f"{field_name}_{sub_key}".strip("_")
+            _append_section(sections, next_name, sub_val)
+        return
+
+    # Fallback: coerce to string
+    text_value = _normalize_text(str(value))
+    if text_value:
+        sections.append((field_name, text_value))
+
+
+def _extract_sections(record: Dict, fields: Optional[Sequence[str]]) -> List[Tuple[str, str]]:
+    """Return (section_name, text) tuples for the requested fields."""
+    sections: List[Tuple[str, str]] = []
+    prioritized_fields = list(fields or TEXTUAL_FIELD_CANDIDATES)
+
+    for field in prioritized_fields:
+        raw_value = record.get(field)
+        if not raw_value:
+            continue
+
+        if field == "claims":
+            if isinstance(raw_value, list):
+                for idx, claim in enumerate(raw_value, start=1):
+                    if not claim:
+                        continue
+                    _append_section(sections, f"claim_{idx}", claim)
+            else:
+                _append_section(sections, "claims", raw_value)
+            continue
+
+        _append_section(sections, field, raw_value)
+
+    # Include any other textual fields we didn't explicitly request
+    for key, value in record.items():
+        if key in NON_TEXTUAL_FIELDS or key in prioritized_fields:
+            continue
+        _append_section(sections, key, value)
+
+    return sections
+
+
 def chunk_patent(
-    record: Dict, chunks_per_patent: int, max_claims: int = 3
+    record: Dict,
+    chunk_size: int,
+    chunk_overlap: int,
+    max_chunks: Optional[int] = None,
+    fields: Optional[Sequence[str]] = None,
 ) -> List[Chunk]:
     publication_number = record.get("publication_number") or record.get("id")
     if not publication_number:
         return []
 
+    sections = _extract_sections(record, fields)
+    if not sections:
+        return []
+
     chunks: List[Chunk] = []
     order = 0
 
-    def add_chunk(text: Optional[str], chunk_type: str):
-        nonlocal order
-        if not text:
-            return
-        chunk_id = f"{publication_number}:{chunk_type}:{order}"
-        chunks.append(
-            Chunk(
-                chunk_id=chunk_id,
-                patent_id=publication_number,
-                chunk_type=chunk_type,
-                text=text.strip(),
-                order=order,
-                publication_date=record.get("filing_date"),
-                cpc_codes=record.get("cpc_codes"),
+    for section_name, text in sections:
+        split_sections = _split_text(text, chunk_size, chunk_overlap)
+        for idx, chunk_text in enumerate(split_sections):
+            if not chunk_text:
+                continue
+            chunk_type = (
+                f"{section_name}_part{idx + 1}" if idx > 0 else section_name
             )
-        )
-        order += 1
+            chunk_id = f"{publication_number}:{chunk_type}:{order}"
+            chunks.append(
+                Chunk(
+                    chunk_id=chunk_id,
+                    patent_id=publication_number,
+                    chunk_type=chunk_type,
+                    text=chunk_text,
+                    order=order,
+                    publication_date=record.get("filing_date"),
+                    cpc_codes=record.get("cpc_codes"),
+                )
+            )
+            order += 1
+            if max_chunks and order >= max_chunks:
+                return chunks
 
-    add_chunk(record.get("title"), "title")
-    add_chunk(record.get("abstract"), "abstract")
-
-    claims = record.get("claims") or []
-    for idx, claim in enumerate(claims[: max_claims]):
-        add_chunk(claim, f"claim_{idx+1}")
-
-    if len(chunks) > chunks_per_patent:
-        chunks = chunks[:chunks_per_patent]
     return chunks
 
 
@@ -432,11 +581,27 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.chunk_size <= args.chunk_overlap:
+        raise ValueError("chunk-size must be greater than chunk-overlap.")
+
+    if isinstance(args.chunk_fields, str):
+        chunk_fields = [f.strip() for f in args.chunk_fields.split(",") if f.strip()]
+    else:
+        chunk_fields = list(args.chunk_fields)
+
+    max_chunks = args.chunks_per_patent or None
+
     chunks: List[Chunk] = []
     patents_processed = 0
 
     for record in iter_patents(input_path, args.max_patents):
-        patent_chunks = chunk_patent(record, args.chunks_per_patent)
+        patent_chunks = chunk_patent(
+            record,
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.chunk_overlap,
+            max_chunks=max_chunks,
+            fields=chunk_fields or None,
+        )
         if not patent_chunks:
             continue
         chunks.extend(patent_chunks)

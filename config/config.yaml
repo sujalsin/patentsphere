@@ -166,7 +166,7 @@ agents:
     
   # AdaptiveRetrievalAgent (RL)
   adaptive_retrieval:
-    enabled: false  # Enable after baseline evaluation
+    enabled: true  # Enable after baseline evaluation
     timeout: 45
     max_retries: 3
     policy_path: "models/policy.pkl"
@@ -238,10 +238,16 @@ rl:
 data:
   # Patent chunking
   chunking:
-    strategy: "fixed"  # fixed, semantic, hybrid
-    chunks_per_patent: 5  # title, abstract, 3 claims
-    max_chunk_length: 2000
-    overlap: 100
+    strategy: "full_text"  # full_text, semantic, hybrid
+    chunk_size: 1800       # target tokens per chunk (word-based)
+    overlap: 200           # overlapping tokens between chunks
+    max_chunks_per_patent: 60
+    fields:
+      - "title"
+      - "abstract"
+      - "description"
+      - "summary"
+      - "claims"
     
   # Citation graph
   citations:

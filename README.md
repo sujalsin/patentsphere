@@ -174,6 +174,24 @@ The `SynthesisAgent` consumes all upstream agent outputs and generates an execut
 
 When the LLM fails, the agent falls back to a claims-only summary and flags `source=heuristic` so the frontend and Critic can detect degraded runs.
 
+## Streamlit Control Room
+
+The Streamlit companion app (`streamlit_app/app.py`) provides a richer console for querying the orchestrator, visualizing retrieved chunks, and drilling into agent logs.
+
+```bash
+streamlit run streamlit_app/app.py
+```
+
+Features:
+
+- Query box + run history (stored locally in the Streamlit session)
+- Agent status cards with latency + error surfacing
+- Rich synthesis view (executive summary, action items, citations)
+- Retrieval browser with expandable chunk previews
+- Raw payload + log inspector per agent
+
+The Streamlit process runs in the same environment as FastAPI and reuses the in-process orchestrator, so make sure Postgres/Qdrant/Ollama are reachable before launching the UI.
+
 ## Litigation Data Setup
 
 ### BigQuery Credentials
@@ -248,6 +266,94 @@ The test suite verifies:
 - All FastAPI endpoints (`/health`, `/whoami`, `/retrieve`, `/query`)
 - All agents (ClaimsAnalyzer, CitationMapper, LitigationScout, Synthesis, CriticAgent)
 - Response times and error handling
+
+## Reinforcement Learning (RLAIF)
+
+PatentSphere uses Reinforcement Learning from AI Feedback (RLAIF) to optimize retrieval depth and quality through the `AdaptiveRetrievalAgent`.
+
+### AdaptiveRetrievalAgent
+
+The `AdaptiveRetrievalAgent` uses Q-learning to adaptively determine retrieval depth based on query type and context. It replaces the standard `CitationMapperAgent` when enabled.
+
+**State Space:**
+- Query type (from ClaimsAnalyzerAgent)
+- Retrieval depth (current iteration)
+- Cumulative reward
+- Chunk quality (average similarity score)
+
+**Actions:**
+- `RETRIEVE`: Initial retrieval
+- `RETRIEVE_MORE`: Additional retrieval iteration
+- `STOP`: End retrieval
+
+**Configuration:**
+Enable in `config/config.yaml`:
+```yaml
+adaptive_retrieval:
+  enabled: true
+  policy_path: "models/policy.pkl"
+  exploration_rate: 0.1
+```
+
+### Training the RL Policy
+
+Train the Q-learning policy using CriticAgent rewards:
+
+```bash
+# Train on 1000 synthetic queries
+python scripts/train_rl_policy.py --episodes 1000 --save-frequency 100
+
+# Options:
+# --episodes: Number of training episodes (default: 1000)
+# --batch-size: Batch size for updates (default: 32)
+# --save-frequency: Save checkpoint every N episodes (default: 100)
+# --validation-split: Fraction for validation set (default: 0.2)
+```
+
+The training script:
+1. Generates synthetic queries
+2. Runs queries through the orchestrator
+3. Collects CriticAgent rewards
+4. Updates Q-values using Q-learning
+5. Saves policy checkpoints
+
+Policy is saved to `models/policy.pkl` and automatically loaded on agent initialization.
+
+### RLAIF Evaluation
+
+Evaluate the trained policy against baseline:
+
+```bash
+# Run RLAIF evaluation on 100 queries
+python evaluation/rlaif_runner.py --queries evaluation/data/baseline_queries.json --limit 100
+
+# Compare baseline vs RLAIF
+python evaluation/compare_baseline_rlaif.py \
+  --baseline evaluation/baseline_scores.json \
+  --rlaif evaluation/rlaif_scores.json \
+  --output evaluation/comparison_report.json
+```
+
+The comparison script performs:
+- Paired t-test for statistical significance
+- Effect size calculation (Cohen's d)
+- Confidence intervals
+- Improvement percentage calculations
+
+### Human Evaluation
+
+Generate evaluation pairs for human grading:
+
+```bash
+# Generate evaluation pairs (baseline + RLAIF)
+python evaluation/human_eval_runner.py \
+  --queries evaluation/human_eval_selected.json \
+  --output-dir evaluation/human_eval
+
+# Aggregate human scores
+python evaluation/human_eval_runner.py \
+  --scores evaluation/human_eval/scores.json
+```
 
 ## Next Steps
 
