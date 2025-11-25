@@ -291,11 +291,44 @@ def ensure_rl_tables(conn) -> None:
                 query_text TEXT NOT NULL,
                 query_type TEXT,
                 retrieved_patent_ids TEXT[],
+                retrieved_chunks JSONB,
                 total_reward DOUBLE PRECISION,
                 reward_components JSONB,
                 agent_outputs JSONB,
+                run_id UUID,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS adaptive_retrieval_events (
+                id SERIAL PRIMARY KEY,
+                run_id UUID NOT NULL,
+                query_text TEXT NOT NULL,
+                query_type TEXT,
+                iteration INT NOT NULL,
+                action TEXT NOT NULL,
+                state JSONB,
+                chunk_ids TEXT[],
+                total_chunks INT,
+                chunk_quality DOUBLE PRECISION,
+                exploration_rate DOUBLE PRECISION,
+                metadata JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE rl_experiences
+            ADD COLUMN IF NOT EXISTS retrieved_chunks JSONB
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE rl_experiences
+            ADD COLUMN IF NOT EXISTS run_id UUID
             """
         )
         cur.execute(
@@ -306,6 +339,18 @@ def ensure_rl_tables(conn) -> None:
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_created_at ON rl_experiences(created_at)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_adaptive_events_run
+            ON adaptive_retrieval_events(run_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_adaptive_events_created
+            ON adaptive_retrieval_events(created_at)
             """
         )
         conn.commit()

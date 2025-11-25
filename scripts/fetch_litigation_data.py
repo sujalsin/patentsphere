@@ -63,11 +63,23 @@ def build_litigation_query(
     """
     Build BigQuery SQL to fetch litigation data from USPTO OCE dataset.
     
-    The dataset has cases and names tables. We join them to get case information
-    with plaintiff/defendant names. Patent numbers may be in case names.
+    We join cases + party names + the patents table so every row emits an
+    explicit patent_id when USPTO provides it. If no patent exists, the row
+    still includes the case (patent_id NULL) so we can backfill later.
     """
-    # Join cases with names to get party information
-    # Use subquery to aggregate party names
+    # Optional filter clause
+    patent_filter = ""
+    if patent_ids:
+        normalized_ids = [normalize_patent_id(pid) for pid in patent_ids if pid]
+        if normalized_ids:
+            # Use IN clause on normalized patent numbers
+            # The patents table stores patent numbers without separators (e.g. US1234567B2)
+            normalized_ids = [pid.replace("-", "").replace(" ", "") for pid in normalized_ids]
+            patent_values = ",".join(f"'{pid}'" for pid in normalized_ids[:1000])
+            patent_filter = f"WHERE REGEXP_REPLACE(pat.patent_number, r'[- ]', '') IN ({patent_values})"
+    
+    limit_clause = f"LIMIT {limit}" if limit else ""
+    
     query = f"""
     WITH case_parties AS (
         SELECT 
@@ -78,51 +90,47 @@ def build_litigation_query(
             c.date_filed,
             c.date_closed,
             c.settlement,
-            STRING_AGG(DISTINCT CASE WHEN n.party_type = 'Plaintiff' THEN n.name END, ', ') as plaintiff_name,
-            STRING_AGG(DISTINCT CASE WHEN n.party_type = 'Defendant' THEN n.name END, ', ') as defendant_name
+            STRING_AGG(DISTINCT CASE WHEN n.party_type = 'Plaintiff' THEN n.name END, ', ') AS plaintiff_name,
+            STRING_AGG(DISTINCT CASE WHEN n.party_type = 'Defendant' THEN n.name END, ', ') AS defendant_name
         FROM `patents-public-data.{dataset_id}.cases` c
         LEFT JOIN `patents-public-data.{dataset_id}.names` n
             ON c.case_row_id = n.case_row_id
         WHERE c.date_filed IS NOT NULL
         GROUP BY c.case_row_id, c.case_number, c.case_name, c.court_name, c.date_filed, c.date_closed, c.settlement
+    ),
+    case_patents AS (
+        SELECT
+            cp.case_number,
+            CONCAT(
+                UPPER(COALESCE(pat.country_code, 'US')),
+                '-',
+                REGEXP_REPLACE(UPPER(COALESCE(pat.patent_number, '')), r'[^A-Z0-9]', '')
+            ) AS normalized_patent_id
+        FROM `patents-public-data.{dataset_id}.case_patents` cp
+        JOIN `patents-public-data.{dataset_id}.patents` pat
+            ON cp.patent_row_id = pat.patent_row_id
+        {patent_filter}
     )
     SELECT 
-        case_number,
-        case_name,
-        court_name,
-        date_filed as filing_date,
-        date_closed,
+        parties.case_number,
+        parties.case_name,
+        parties.court_name,
+        parties.date_filed AS filing_date,
+        parties.date_closed,
         CASE 
-            WHEN date_closed IS NOT NULL AND date_closed != '' THEN 'closed'
-            WHEN settlement IS NOT NULL AND settlement != '' THEN 'settled'
+            WHEN parties.date_closed IS NOT NULL AND parties.date_closed != '' THEN 'closed'
+            WHEN parties.settlement IS NOT NULL AND parties.settlement != '' THEN 'settled'
             ELSE 'active'
-        END as case_status,
-        settlement as outcome,
-        plaintiff_name,
-        defendant_name,
-        -- Try to extract patent numbers from case name
-        REGEXP_EXTRACT_ALL(case_name, r'\\b(US|EP|WO|JP|CN|KR|GB|DE|FR)[- ]?\\d+[A-Z]?\\d*\\b') as potential_patents
-    FROM case_parties
-    WHERE 1=1
+        END AS case_status,
+        parties.settlement AS outcome,
+        parties.plaintiff_name,
+        parties.defendant_name,
+        cp.normalized_patent_id AS patent_id
+    FROM case_parties parties
+    LEFT JOIN case_patents cp
+        ON parties.case_number = cp.case_number
+    {limit_clause}
     """
-    
-    # Add WHERE clause if patent IDs provided (search in case names)
-    if patent_ids and len(patent_ids) > 0:
-        normalized_ids = [normalize_patent_id(pid) for pid in patent_ids if pid]
-        if normalized_ids:
-            # Search for patent numbers in case names
-            # Create LIKE conditions for each patent ID
-            conditions = []
-            for pid in normalized_ids[:100]:  # Limit to avoid query size issues
-                # Remove common prefixes for matching
-                pid_clean = pid.replace("US-", "").replace("US", "").replace("-", "")
-                conditions.append(f"case_name LIKE '%{pid_clean}%'")
-            
-            if conditions:
-                query += " AND (" + " OR ".join(conditions) + ")"
-    
-    if limit:
-        query += f" LIMIT {limit}"
     
     return query
 

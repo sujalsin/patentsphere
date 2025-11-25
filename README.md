@@ -311,11 +311,16 @@ python scripts/train_rl_policy.py --episodes 1000 --save-frequency 100
 ```
 
 The training script:
-1. Generates synthetic queries
-2. Runs queries through the orchestrator
-3. Collects CriticAgent rewards
-4. Updates Q-values using Q-learning
-5. Saves policy checkpoints
+1. Replays logged adaptive runs stored in Postgres (`adaptive_retrieval_events` joined with `rl_experiences`) to warm up the policy.
+2. Generates synthetic queries
+3. Runs queries through the orchestrator
+4. Collects CriticAgent rewards
+5. Updates Q-values using Q-learning
+6. Saves policy checkpoints
+
+Telemetry and rewards are persisted automatically:
+- Each AdaptiveRetrievalAgent run writes per-iteration telemetry to `adaptive_retrieval_events` (state vector, action, chunk coverage, exploration rate).
+- CriticAgent scores are recorded in `rl_experiences` alongside sanitized chunk metadata and the telemetry `run_id`, enabling offline replay via `train_rl_policy.py`.
 
 Policy is saved to `models/policy.pkl` and automatically loaded on agent initialization.
 

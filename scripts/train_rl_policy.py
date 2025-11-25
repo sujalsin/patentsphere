@@ -108,7 +108,12 @@ async def load_rewards_from_db(
                     """
                     SELECT 
                         id, query_text, query_type, retrieved_patent_ids,
-                        total_reward, reward_components, agent_outputs, created_at
+                        retrieved_chunks,
+                        total_reward,
+                        reward_components,
+                        agent_outputs,
+                        run_id,
+                        created_at
                     FROM rl_experiences
                     WHERE total_reward IS NOT NULL
                     ORDER BY created_at DESC
@@ -120,6 +125,91 @@ async def load_rewards_from_db(
     except Exception as exc:
         logger.error("Failed to load rewards from database: %s", exc)
         return []
+
+
+async def load_telemetry_events(
+    settings, run_ids: List[str]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Load adaptive retrieval telemetry rows keyed by run_id."""
+    if not run_ids:
+        return {}
+
+    pg_cfg = settings.database
+    conn_str = f"postgresql://{pg_cfg.user}:{pg_cfg.password}@{pg_cfg.host}:{pg_cfg.port}/{pg_cfg.database}"
+
+    try:
+        with psycopg.connect(conn_str, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 
+                        run_id::text AS run_id,
+                        iteration,
+                        action,
+                        state,
+                        metadata
+                    FROM adaptive_retrieval_events
+                    WHERE run_id = ANY(%s)
+                    ORDER BY run_id, iteration
+                    """,
+                    (run_ids,),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:
+        logger.error("Failed to load telemetry events: %s", exc)
+        return {}
+
+    events: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        events.setdefault(row["run_id"], []).append(row)
+    return events
+
+
+async def replay_logged_experiences(
+    settings,
+    adaptive_agent: AdaptiveRetrievalAgent,
+    limit: int = 500,
+) -> None:
+    """Warm up the policy using logged adaptive runs + critic rewards."""
+    experiences = await load_rewards_from_db(settings, limit)
+    run_ids = [str(exp["run_id"]) for exp in experiences if exp.get("run_id")]
+    telemetry_map = await load_telemetry_events(settings, run_ids)
+
+    if not telemetry_map:
+        logger.info("No adaptive telemetry available to replay.")
+        return
+
+    updated = 0
+    for exp in experiences:
+        run_id = exp.get("run_id")
+        if not run_id:
+            continue
+        run_key = str(run_id)
+        events = telemetry_map.get(run_key, [])
+        if len(events) < 2:
+            continue
+
+        reward = exp.get("total_reward") or 0.0
+
+        for idx in range(len(events) - 1):
+            state_vec = events[idx].get("state") or []
+            next_state_vec = events[idx + 1].get("state") or state_vec
+            if not state_vec or not next_state_vec:
+                continue
+            state = tuple(state_vec)
+            next_state = tuple(next_state_vec)
+            action = events[idx].get("action", "STOP")
+            # Reward applied only to final transition to avoid double-counting
+            transition_reward = reward if idx == len(events) - 2 else 0.0
+            adaptive_agent.update_q_value(state, action, transition_reward, next_state)
+
+        adaptive_agent.decay_exploration()
+        updated += 1
+
+    if updated:
+        logger.info("Replayed %d logged experiences into the policy.", updated)
+    else:
+        logger.info("Logged experiences found but insufficient telemetry for replay.")
 
 
 async def run_training_episode(
@@ -228,6 +318,8 @@ async def train_policy_parallel(
     if not adaptive_agent:
         logger.error("AdaptiveRetrievalAgent not found. Enable it in config.yaml")
         return
+
+    await replay_logged_experiences(settings, adaptive_agent, limit=1000)
     
     # Generate synthetic queries
     logger.info("Generating %d synthetic queries...", episodes)

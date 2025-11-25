@@ -7,6 +7,10 @@ import random
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+import uuid
+
+import psycopg
+from psycopg.types.json import Jsonb
 
 from app.agents.base import AgentResult, BaseAgent
 from app.agents.citation import CitationMapperAgent
@@ -231,7 +235,10 @@ class AdaptiveRetrievalAgent(BaseAgent):
             )
         
         try:
-            # Initialize state
+            # Initialize state + telemetry tracker
+            telemetry_run_id = uuid.uuid4()
+            telemetry_events: List[Dict[str, Any]] = []
+
             query_type = query_type or "other"
             retrieval_depth = 0
             cumulative_reward = 0.0
@@ -280,11 +287,18 @@ class AdaptiveRetrievalAgent(BaseAgent):
                 
                 # Execute action
                 if action == "STOP":
+                    telemetry_events.append(
+                        self._build_telemetry_event(
+                            iteration=len(telemetry_events),
+                            state=state,
+                            action=action,
+                            chunk_quality=chunk_quality,
+                            results=all_results,
+                        )
+                    )
                     break
                 elif action == "RETRIEVE_MORE":
                     # Perform additional retrieval
-                    # Use offset to get next batch
-                    offset = len(all_results)
                     citation_result = await self.citation_agent.run(query)
                     if citation_result.success:
                         new_results = citation_result.data.get("results", [])
@@ -293,8 +307,26 @@ class AdaptiveRetrievalAgent(BaseAgent):
                         new_results = [r for r in new_results if r.get("patent_id") not in existing_ids]
                         all_results.extend(new_results)
                         chunk_quality = self._calculate_chunk_quality(all_results)
+                    telemetry_events.append(
+                        self._build_telemetry_event(
+                            iteration=len(telemetry_events),
+                            state=state,
+                            action=action,
+                            chunk_quality=chunk_quality,
+                            results=all_results,
+                        )
+                    )
                     retrieval_depth += 1
                 else:  # RETRIEVE (already done on first iteration)
+                    telemetry_events.append(
+                        self._build_telemetry_event(
+                            iteration=len(telemetry_events),
+                            state=state,
+                            action=action,
+                            chunk_quality=chunk_quality,
+                            results=all_results,
+                        )
+                    )
                     retrieval_depth += 1
                     if retrieval_depth >= self.max_depth:
                         break
@@ -313,8 +345,17 @@ class AdaptiveRetrievalAgent(BaseAgent):
                 "total_chunks": len(all_results),
                 "rl_metadata": rl_metadata,
                 "latency_ms": latency_ms,
+                "telemetry_run_id": str(telemetry_run_id),
             }
-            
+
+            if telemetry_events:
+                await self._log_telemetry(
+                    run_id=telemetry_run_id,
+                    query=query,
+                    query_type=query_type,
+                    events=telemetry_events,
+                )
+
             return AgentResult(agent=self.name, success=True, data=data)
             
         except Exception as exc:
@@ -334,3 +375,114 @@ class AdaptiveRetrievalAgent(BaseAgent):
             "policy_path": str(self.policy_path),
             "policy_exists": self.policy_path.exists(),
         }
+
+    def _build_telemetry_event(
+        self,
+        iteration: int,
+        state: Tuple[str, int, float, float],
+        action: str,
+        chunk_quality: float,
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        patent_ids: List[str] = []
+        seen = set()
+        for entry in results:
+            pid = entry.get("patent_id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                patent_ids.append(pid)
+            if len(patent_ids) >= 100:
+                break
+
+        metadata = {
+            "unique_patent_count": len(seen),
+            "total_results": len(results),
+        }
+
+        return {
+            "iteration": iteration,
+            "state": list(state),
+            "action": action,
+            "chunk_quality": chunk_quality,
+            "total_chunks": len(results),
+            "chunk_ids": patent_ids,
+            "metadata": metadata,
+        }
+
+    async def _log_telemetry(
+        self,
+        run_id: uuid.UUID,
+        query: str,
+        query_type: str,
+        events: List[Dict[str, Any]],
+    ) -> None:
+        """Persist adaptive retrieval telemetry events to Postgres."""
+        if not events or not self.settings:
+            return
+
+        db_cfg = getattr(self.settings, "database", None)
+        if not db_cfg:
+            return
+
+        required_str_attrs = ("user", "password", "host", "database")
+        for attr in required_str_attrs:
+            value = getattr(db_cfg, attr, None)
+            if not isinstance(value, str) or not value:
+                return
+        port = getattr(db_cfg, "port", None)
+        if not isinstance(port, int):
+            return
+
+        conn_str = (
+            f"postgresql://{db_cfg.user}:{db_cfg.password}"
+            f"@{db_cfg.host}:{db_cfg.port}/{db_cfg.database}"
+        )
+
+        rows = [
+            (
+                run_id,
+                query,
+                query_type,
+                event.get("iteration"),
+                event.get("action"),
+                Jsonb(event.get("state")),
+                event.get("chunk_ids"),
+                event.get("total_chunks"),
+                event.get("chunk_quality"),
+                self.exploration_rate,
+                Jsonb(event.get("metadata", {})),
+            )
+            for event in events
+        ]
+
+        def _write() -> None:
+            try:
+                with psycopg.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        cur.executemany(
+                            """
+                            INSERT INTO adaptive_retrieval_events (
+                                run_id,
+                                query_text,
+                                query_type,
+                                iteration,
+                                action,
+                                state,
+                                chunk_ids,
+                                total_chunks,
+                                chunk_quality,
+                                exploration_rate,
+                                metadata
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            rows,
+                        )
+                    conn.commit()
+            except Exception as exc:
+                logger.debug("Failed to log adaptive telemetry: %s", exc)
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("Telemetry logging thread failed: %s", exc)

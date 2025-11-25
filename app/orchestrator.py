@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List
 
 import psycopg
+import uuid
 from psycopg.types.json import Jsonb
 
 from app.agents.base import AgentResult, BaseAgent
@@ -262,12 +263,21 @@ class Orchestrator:
             try:
                 # Extract data for critic
                 retrieved_chunks = []
+                telemetry_payload = context.get("adaptive_retrieval", {})
+                telemetry_run_id_raw = telemetry_payload.get("telemetry_run_id")
+                telemetry_run_id = None
+                if telemetry_run_id_raw:
+                    try:
+                        telemetry_run_id = uuid.UUID(str(telemetry_run_id_raw))
+                    except (ValueError, TypeError):
+                        telemetry_run_id = None
                 if "citation_mapper" in context:
                     citation_data = context["citation_mapper"]
                     retrieved_chunks = citation_data.get("results", [])
                 
                 claims_analysis = context.get("claims_analyzer", {})
                 synthesis_output = context.get("synthesis", {})
+                chunk_payload = self._prepare_chunk_payload(retrieved_chunks)
                 
                 # Run critic with proper parameters
                 start = time.time()
@@ -289,8 +299,10 @@ class Orchestrator:
                             query,
                             claims_analysis.get("query_type"),
                             retrieved_chunks,
+                            chunk_payload,
                             critic_result.data,
                             context,
+                            telemetry_run_id,
                         )
                         results.append(critic_result)
                         context["critic"] = critic_result.data
@@ -315,13 +327,31 @@ class Orchestrator:
 
         return {res.agent: res for res in results}
 
+    def _prepare_chunk_payload(
+        self, chunks: List[Dict[str, Any]], limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        payload: List[Dict[str, Any]] = []
+        for entry in chunks[:limit]:
+            payload.append(
+                {
+                    "chunk_id": entry.get("chunk_id"),
+                    "patent_id": entry.get("patent_id"),
+                    "chunk_type": entry.get("chunk_type"),
+                    "chunk_order": entry.get("chunk_order") or entry.get("order"),
+                    "score": entry.get("score"),
+                }
+            )
+        return payload
+
     async def _log_reward(
         self,
         query: str,
         query_type: str | None,
         retrieved_chunks: List[Dict[str, Any]],
+        retrieved_chunk_payload: List[Dict[str, Any]],
         critic_data: Dict[str, Any],
         context: Dict[str, Any],
+        telemetry_run_id: uuid.UUID | None,
     ) -> None:
         """Log reward to rl_experiences table in PostgreSQL."""
         settings = get_settings()
@@ -343,18 +373,26 @@ class Orchestrator:
                     cur.execute(
                         """
                         INSERT INTO rl_experiences (
-                            query_text, query_type, retrieved_patent_ids,
-                            total_reward, reward_components, agent_outputs
+                            query_text,
+                            query_type,
+                            retrieved_patent_ids,
+                            retrieved_chunks,
+                            total_reward,
+                            reward_components,
+                            agent_outputs,
+                            run_id
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             query,
                             query_type,
                             patent_ids,
+                            Jsonb(retrieved_chunk_payload),
                             critic_data.get("score"),
                             Jsonb(critic_data.get("components", {})),
                             Jsonb(context),
+                            telemetry_run_id,
                         ),
                     )
                 conn.commit()
