@@ -475,7 +475,7 @@ def upsert_litigation(conn, litigation_records: List[Dict]) -> None:
                 )
                 VALUES (%(patent_id)s, %(case_number)s, %(court_name)s, %(filing_date)s,
                         %(case_status)s, %(outcome)s, %(plaintiff_name)s, %(defendant_name)s)
-                ON CONFLICT (case_number) DO UPDATE SET
+                ON CONFLICT (patent_id, case_number) DO UPDATE SET
                     patent_id = EXCLUDED.patent_id,
                     court_name = EXCLUDED.court_name,
                     filing_date = EXCLUDED.filing_date,

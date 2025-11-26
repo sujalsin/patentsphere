@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import streamlit as st
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# ensure the streamlit_app directory does not shadow the actual app package
+if str(SCRIPT_DIR) in sys.path:
+    sys.path = [p for p in sys.path if p != str(SCRIPT_DIR)]
+    sys.path.append(str(SCRIPT_DIR))
+
+# Explicitly load the backend package to avoid Streamlit's module name clash
+if "app" not in sys.modules or not getattr(sys.modules["app"], "__path__", None):
+    spec = importlib.util.spec_from_file_location(
+        "app", ROOT / "app" / "__init__.py"
+    )
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["app"] = module
+        spec.loader.exec_module(module)
 
 from app.agents.base import AgentResult
 from app.orchestrator import Orchestrator
@@ -100,8 +124,10 @@ def render_synthesis(serialized: Dict[str, Dict[str, Any]]) -> None:
 
     data = synthesis.get("data") or {}
     summary = data.get("executive_summary")
-    action_items = data.get("action_items") or []
+    sections = data.get("insight_sections") or []
+    next_steps = data.get("next_steps") or data.get("action_items") or []
     citations = data.get("citations") or []
+    risk_score = data.get("risk_score")
 
     st.subheader("Synthesis Summary")
     if summary:
@@ -109,13 +135,32 @@ def render_synthesis(serialized: Dict[str, Dict[str, Any]]) -> None:
     else:
         st.info("Synthesis agent did not return a summary.")
 
-    if action_items:
-        st.markdown("**Action Items**")
-        for item in action_items:
-            priority = item.get("priority", "n/a").upper()
+    if risk_score is not None:
+        st.caption(f"Risk score: {risk_score}/100")
+
+    if sections:
+        for section in sections:
+            title = section.get("title", "Insights")
+            st.markdown(f"**{title}**")
+            for idx, bullet in enumerate(section.get("bullets", []), start=1):
+                headline = bullet.get("headline", "Insight")
+                st.markdown(f"{idx}. **{headline}**")
+                details = bullet.get("details") or []
+                for detail in details:
+                    st.write(f"   - {detail}")
+                cites = bullet.get("citations") or []
+                if cites:
+                    st.caption(f"   Citations: {', '.join(cites)}")
+
+    if next_steps:
+        st.markdown("**Next Steps**")
+        for item in next_steps:
+            priority = (item.get("priority") or "n/a").upper()
             recommendation = item.get("recommendation", "")
             rationale = item.get("rationale", "")
-            st.write(f"- `{priority}` {recommendation}\n  - {rationale}")
+            st.write(f"- `{priority}` {recommendation}")
+            if rationale:
+                st.caption(rationale)
 
     if citations:
         st.markdown("**Citations**")

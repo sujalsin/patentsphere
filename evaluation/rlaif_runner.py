@@ -111,6 +111,7 @@ async def run_rlaif_evaluation(
     """
     logger.info("Starting RLAIF evaluation on %d queries", len(queries))
     
+    # Create orchestrator (will use GPU if config.embeddings.device is set to "auto" or "cuda")
     orchestrator = Orchestrator()
     
     # Check if adaptive retrieval is enabled
@@ -217,8 +218,22 @@ async def main():
         default=100,
         help="Limit number of queries to evaluate",
     )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Force GPU usage for embeddings (overrides config to 'cuda')",
+    )
     
     args = parser.parse_args()
+    
+    # Override device setting if --gpu flag is provided
+    if args.gpu:
+        from config.settings import get_settings
+        settings = get_settings()
+        # Temporarily override device for this run
+        original_device = settings.embeddings.device
+        settings.embeddings.device = "cuda"
+        logger.info("GPU mode enabled for embeddings (via --gpu flag, was: %s)", original_device)
     
     # Load queries
     queries = load_queries(args.queries)

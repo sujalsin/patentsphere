@@ -5,6 +5,8 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
 import psycopg
@@ -65,6 +67,7 @@ class ClaimsAnalyzerAgent(BaseAgent):
         self.settings = settings
         self.llm = llm_service or LLMService(settings)
         self.agent_cfg = settings.claims_analyzer if settings else None
+        self.bad_json_log_path = Path("logs/claims_analyzer_bad_json.log")
 
     async def run(self, query: str) -> AgentResult:
         start = time.perf_counter()
@@ -78,8 +81,9 @@ class ClaimsAnalyzerAgent(BaseAgent):
                 agent=self.name,
                 user_prompt=PROMPT_TEMPLATE.format(query=query_text),
                 system_prompt=SYSTEM_PROMPT,
-                temperature=0.25,
-                max_tokens=512,  # Reduced from 1024 for faster response
+                temperature=0.1,
+                max_tokens=768,  # Slightly higher to avoid truncation
+                response_format="json",
             )
             # Add timeout wrapper to fail fast if LLM hangs
             import asyncio
@@ -87,7 +91,9 @@ class ClaimsAnalyzerAgent(BaseAgent):
                 self.llm.generate(llm_request, retries=2),  # Reduced retries
                 timeout=120  # 2 minute timeout for LLM call
             )
-            analysis = self._parse_response(raw_response, fallback_query=query_text)
+            analysis = await self._parse_or_repair_response(
+                raw_response, fallback_query=query_text
+            )
         except asyncio.TimeoutError:
             logger.warning("ClaimsAnalyzer LLM call timed out, using fallback")
             analysis = self._fallback_analysis(query_text)
@@ -122,6 +128,21 @@ class ClaimsAnalyzerAgent(BaseAgent):
             error=error_message,
         )
 
+    async def _parse_or_repair_response(
+        self, response_text: str, fallback_query: str
+    ) -> ClaimsAnalysis:
+        try:
+            return self._parse_response(response_text, fallback_query)
+        except json.JSONDecodeError as exc:
+            self._log_bad_response(response_text, exc, stage="initial")
+            repaired = await self._repair_json_via_llm(response_text, fallback_query)
+            if repaired:
+                try:
+                    return self._parse_response(repaired, fallback_query)
+                except json.JSONDecodeError as repair_exc:
+                    self._log_bad_response(repaired, repair_exc, stage="repair")
+            raise
+
     def _parse_response(self, response_text: str, fallback_query: str) -> ClaimsAnalysis:
         data = self._coerce_json(response_text)
         features = self._normalize_list_of_dicts(data.get("features"), ["name", "insight"])
@@ -152,6 +173,64 @@ class ClaimsAnalyzerAgent(BaseAgent):
             if start != -1 and end != -1 and end > start:
                 return json.loads(text[start : end + 1])
             raise
+
+    async def _repair_json_via_llm(
+        self, response_text: str, fallback_query: str
+    ) -> str | None:
+        """Ask the LLM to repair malformed JSON output."""
+        repair_prompt = (
+            "The previous response was supposed to be valid JSON following this schema:\n"
+            '{\n'
+            '  "summary": "string",\n'
+            '  "query_type": "string",\n'
+            '  "features": [{"name": "string", "insight": "string", "evidence": "string"}],\n'
+            '  "cpc_codes": [{"code": "string", "title": "string", "confidence": 0-1, "justification": "string"}],\n'
+            '  "assumptions": ["string"],\n'
+            '  "confidence": 0-1\n'
+            '}\n\n'
+            "Please fix the JSON for the query below. Return ONLY valid JSON with the same information.\n"
+            f"Query: {fallback_query}\n"
+            "Original malformed response:\n"
+            f"{response_text}\n"
+        )
+
+        llm_request = LLMRequest(
+            agent=f"{self.name}_json_repair",
+            user_prompt=repair_prompt,
+            system_prompt="You convert malformed JSON into valid JSON without adding commentary.",
+            temperature=0.0,
+            max_tokens=512,
+            response_format="json",
+        )
+
+        try:
+            import asyncio
+
+            repaired = await asyncio.wait_for(
+                self.llm.generate(llm_request, retries=1),
+                timeout=45,
+            )
+            return repaired.strip()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("ClaimsAnalyzer JSON repair failed: %s", exc)
+            return None
+
+    def _log_bad_response(
+        self, response_text: str, exc: Exception, stage: str = "initial"
+    ) -> None:
+        """Persist malformed responses for offline inspection."""
+        try:
+            self.bad_json_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.bad_json_log_path.open("a", encoding="utf-8") as log_file:
+                log_entry = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "stage": stage,
+                    "error": str(exc),
+                    "response_preview": response_text.strip(),
+                }
+                log_file.write(json.dumps(log_entry) + "\n")
+        except Exception as log_exc:  # pylint: disable=broad-except
+            logger.debug("Failed to log malformed JSON response: %s", log_exc)
 
     def _normalize_list_of_dicts(
         self, value: Any, required_keys: List[str]

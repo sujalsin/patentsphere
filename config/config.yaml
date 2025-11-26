@@ -95,7 +95,7 @@ embeddings:
   dimension: 384
   batch_size: 32
   max_length: 512
-  device: "cpu"  # cpu, cuda, mps
+  device: "auto"  # auto (detects CUDA), cpu, cuda, mps
   normalize: true
   
 # ============================================================================
@@ -104,7 +104,10 @@ embeddings:
 llm:
   # Ollama settings
   ollama:
-    host: "${OLLAMA_HOST:http://localhost:11434}"
+    # Primary host (point to the first running instance)
+    host: "${OLLAMA_HOST:http://localhost:11435}"
+    # Optional secondary host for manual load distribution (set via env if needed)
+    secondary_host: "${OLLAMA_SECONDARY_HOST:http://localhost:11436}"
     timeout: 300  # Increased to 5 minutes for model loading and long responses
     
   # Model configurations
@@ -126,6 +129,7 @@ llm:
   # Model assignments for agents
   agent_models:
     claims_analyzer: "mistral"
+    claims_analyzer_json_repair: "mistral"
     synthesis: "llama3"
     critic: "llama3"
     
@@ -188,7 +192,7 @@ agents:
 orchestrator:
   execution_mode: "parallel"  # parallel, sequential
   max_concurrent_agents: 4
-  timeout: 120  # Overall query timeout in seconds
+  timeout: 180  # Overall query timeout in seconds
   retry_failed_agents: true
   aggregate_strategy: "weighted"  # weighted, majority, consensus
   

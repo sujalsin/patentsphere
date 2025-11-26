@@ -69,6 +69,8 @@ class LLMService:
 
         if request.system_prompt:
             payload["system"] = request.system_prompt
+        if request.response_format:
+            payload["format"] = request.response_format
         if request.max_tokens or (model_cfg and model_cfg.max_tokens):
             payload["options"]["num_predict"] = request.max_tokens or model_cfg.max_tokens
 
