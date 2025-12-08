@@ -33,3 +33,4 @@ fi
 
 echo "[entrypoint] Starting Chainlit..."
 exec chainlit run /app/app.py -h 0.0.0.0 -p 8000
+

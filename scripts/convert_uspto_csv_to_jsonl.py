@@ -109,3 +109,4 @@ if __name__ == "__main__":
         sys.exit(1)
     
     convert_csv_to_jsonl(cases_csv, patents_csv, output_path)
+
