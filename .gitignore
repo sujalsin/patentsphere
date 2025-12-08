@@ -1,0 +1,197 @@
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# ============================================
+# Environment Variables & Secrets
+# ============================================
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+*.env
+secrets/
+credentials/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ============================================
+# Google Cloud / BigQuery Credentials
+# ============================================
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!pytest.ini
+!requirements.txt
+gcloud/
+.gcloud/
+service-account*.json
+*credentials*.json
+*key*.json
+application_default_credentials.json
+~/.config/gcloud/
+
+# ============================================
+# Database Files
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+postgres_data/
+pgdata/
+
+# ============================================
+# Data Files (Large/Sensitive)
+# ============================================
+data/*.jsonl
+data/*.csv
+data/*.zip
+data/*.parquet
+data/*.json
+data/processed/
+data/raw/
+*.jsonl
+*.csv
+*.parquet
+!requirements.txt
+!package.json
+!tsconfig.json
+!pytest.ini
+
+# Keep data directory structure but ignore contents
+data/*
+!data/.gitkeep
+
+# ============================================
+# IDE & Editor Files
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.cursor/
+.chainlit/
+*.code-workspace
+
+# ============================================
+# Logs
+# ============================================
+*.log
+logs/
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================
+# Temporary Files
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+.files/
+*.pid
+*.seed
+*.pid.lock
+
+# ============================================
+# Model Files & Embeddings
+# ============================================
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.safetensors
+models/
+checkpoints/
+embeddings/
+*.bin
+*.onnx
+
+# ============================================
+# Docker
+# ============================================
+.dockerignore
+docker-compose.override.yml
+
+# ============================================
+# Jupyter Notebooks
+# ============================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ============================================
+# OS Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ============================================
+# Chainlit
+# ============================================
+.chainlit/
+chainlit.db
+
+# ============================================
+# Project Specific
+# ============================================
+# Remove any files with sensitive project IDs
+*project*.json
+*service-account*.json
+
+# ============================================
+# Keep Important Files
+# ============================================
+!.gitignore
+!README.md
+!AGENTS.md
+!requirements.txt
+!docker-compose.yml
+!pytest.ini

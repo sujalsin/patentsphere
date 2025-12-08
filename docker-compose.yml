@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: patentsphere-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - patentsphere-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: patentsphere-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: patentuser
+      POSTGRES_PASSWORD: patentpass
+      POSTGRES_DB: patentsphere
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - patentsphere-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patentsphere"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  qdrant_storage:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  patentsphere-network:
+    driver: bridge
+
