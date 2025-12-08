@@ -121,6 +121,8 @@ class PostgresClient:
         
         # Remove duplicates
         unique_ids = list(set([pid for pid in normalized_ids if pid]))
+        # Fuzzy patterns to allow kind-code suffixes (e.g., US12345 -> US12345A)
+        like_patterns = [f"{pid}%" for pid in unique_ids]
         
         # Query with case-insensitive matching and format normalization
         # Use UPPER and REPLACE to normalize both sides for comparison
@@ -142,10 +144,11 @@ class PostgresClient:
                 OR UPPER(patent_id) = ANY($1::text[])
                 OR UPPER(REPLACE(patent_id, '-', '')) = ANY($1::text[])
                 OR UPPER(REPLACE(patent_id, '/', '')) = ANY($1::text[])
+                OR patent_id ILIKE ANY($2::text[])
             )
             ORDER BY filing_date DESC
         """
-        return await self.fetch(query, unique_ids)
+        return await self.fetch(query, unique_ids, like_patterns)
     
     async def search_litigation_by_keywords(self, keywords: List[str], limit: int = 10) -> List[Dict[str, Any]]:
         """Search litigation cases by keywords in case name, plaintiff, or defendant.
@@ -188,7 +191,7 @@ class PostgresClient:
         if not conditions:
             return []
         
-        query = f"""
+        and_query = f"""
             SELECT 
                 case_number,
                 case_name,
@@ -200,13 +203,19 @@ class PostgresClient:
                 patent_id,
                 outcome
             FROM litigation_cases
-            WHERE ({' OR '.join(conditions)})
+            WHERE ({' AND '.join(conditions)})
             ORDER BY filing_date DESC
             LIMIT ${param_idx}
         """
         params.append(limit)
         
-        return await self.fetch(query, *params)
+        results = await self.fetch(and_query, *params)
+        if results:
+            return results
+        
+        # Fallback: OR search (limited to 5 results to avoid flooding)
+        or_query = and_query.replace(' AND '.join(conditions), ' OR '.join(conditions)).replace(f"LIMIT ${param_idx}", "LIMIT 5")
+        return await self.fetch(or_query, *params[:-1])
 
 
 # Global instance

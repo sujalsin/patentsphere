@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: patents
+      POSTGRES_USER: patents
+      POSTGRES_PASSWORD: patents
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: patents
+      POSTGRES_PASSWORD: patents
+      POSTGRES_DATABASE: patents
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      OLLAMA_HOST: 127.0.0.1
+      OLLAMA_PORT: 11435
+      RUN_INGEST: "false"
+    depends_on:
+      - postgres
+      - qdrant
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../data:/app/data
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: patents
+      POSTGRES_PASSWORD: patents
+      POSTGRES_DATABASE: patents
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      OLLAMA_HOST: 127.0.0.1
+      OLLAMA_PORT: 11435
+    command: ["/app/docker/ingest.sh"]
+    depends_on:
+      - postgres
+      - qdrant
+    volumes:
+      - ../data:/app/data
+
+volumes:
+  pgdata:
+  qdrant_storage:

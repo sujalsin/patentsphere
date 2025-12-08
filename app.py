@@ -91,7 +91,7 @@ async def main(message: cl.Message):
     ):
         event_type = event.get("event")
         event_name = event.get("name", "")
-        event_data = event.get("data", {})
+        event_data = event.get("data") or {}
         
         # Handle node start events - show status
         if event_type == "on_chain_start":
@@ -112,7 +112,7 @@ async def main(message: cl.Message):
         
         # Handle node end events - update status with results
         elif event_type == "on_chain_end":
-            output = event_data.get("output", {})
+            output = event_data.get("output") or {}
             
             if event_name == "router" and "router" in status_messages:
                 intent = output.get("intent", "UNKNOWN")
@@ -120,9 +120,11 @@ async def main(message: cl.Message):
                 await status_messages["router"].update()
             
             elif event_name == "extractor" and "extractor" in status_messages:
-                keywords = output.get("keywords", [])
-                keywords_str = ", ".join(keywords[:3]) if keywords else "N/A"
-                status_messages["extractor"].content = f"🕷️ **Extractor:** Keywords → `{keywords_str}`"
+                tech = output.get("technical_keywords") or output.get("keywords") or []
+                legal = output.get("legal_entities") or []
+                tech_str = ", ".join(tech[:3]) if tech else "N/A"
+                legal_str = ", ".join(legal[:2]) if legal else "None"
+                status_messages["extractor"].content = f"🕷️ **Extractor:** Tech → `{tech_str}` | Legal → `{legal_str}`"
                 await status_messages["extractor"].update()
             
             elif event_name == "retrieval":

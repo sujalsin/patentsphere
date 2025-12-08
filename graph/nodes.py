@@ -79,25 +79,74 @@ Be precise and consistent."""
 
 
 async def extractor_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract keywords and expand query into 3-5 search variations."""
+    """Extract technical vs. legal signals for retrieval."""
     query = state.get("query", "")
     
-    system_prompt = """You are a query extractor and expander for patent search.
-Your task is to:
-1. Extract the core technical terms from the user query
-2. Expand the query into 3-5 distinct search variations including:
-   - Technical synonyms (e.g., "car suspension" → "vehicle damping system", "active chassis control")
-   - Related technical terms
-   - Relevant CPC codes when applicable (e.g., "CPC: B60G" for automotive suspension)
-   - Alternative phrasings
+    system_prompt = """You are a Patent Search Expert. Your goal is to convert user queries into a precise JSON search object.
 
-Return ONLY a JSON object with this exact format:
+### RULES:
+
+1. **TRANSFORM, DON'T JUST EXTRACT:**
+   - Input: "Patents on robotic arms"
+   - BAD Output: ["Patents on robotic", "arms"]
+   - GOOD Output: ["robotic arm", "manipulator", "end effector", "CPC: B25J"]
+   - **Reasoning:** You must generate *synonyms* and *CPC codes*. Remove words like "Patents on", "regarding", "Show me".
+
+2. **SEPARATE LEGAL vs TECHNICAL:**
+   - `technical_keywords`: Concepts, inventions, machines, chemicals. (For Vector DB)
+   - `legal_entities`: Company names (Apple, Tesla), Courts (E.D. Texas), or specific Case Names. (For SQL DB)
+   - If the user asks "Has Apple sued?", "Apple" is a LEGAL entity, NOT a technical keyword.
+
+3. **EXPANSION STRATEGY:**
+   - For every technical term found, add 1-2 synonyms or related terms.
+   - Example: "Drone" -> ["drone", "UAV", "quadcopter", "aerial vehicle"]
+
+### RESPONSE FORMAT (JSON ONLY):
 {
-  "keywords": ["original query", "synonym1", "technical_term", "CPC: CODE"],
-  "date_range": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} or null
+    "technical_keywords": ["string", "string"],
+    "legal_entities": ["string", "string"],
+    "patent_ids": ["string"],
+    "date_range": null
 }
 
-The keywords array must contain 3-5 variations. Include CPC codes when relevant."""
+### EXAMPLES (FOLLOW THESE PATTERNS):
+
+Input: "Patents on robotic manipulators or grasp planning—key innovations."
+Output:
+{
+    "technical_keywords": ["robotic manipulator", "grasp planning", "robotic arm", "end effector", "motion planning", "CPC: B25J"],
+    "legal_entities": [],
+    "patent_ids": [],
+    "date_range": null
+}
+
+Input: "Has Apple sued Samsung over touchscreen patents?"
+Output:
+{
+    "technical_keywords": ["touchscreen", "capacitive touch", "user interface", "display panel", "CPC: G06F"],
+    "legal_entities": ["Apple", "Samsung"],
+    "patent_ids": [],
+    "date_range": null
+}
+
+Input: "Prior art for US-9876543 regarding transformer architecture"
+Output:
+{
+    "technical_keywords": ["transformer architecture", "self-attention", "neural network", "natural language processing"],
+    "legal_entities": [],
+    "patent_ids": ["US9876543"],
+    "date_range": null
+}
+
+Input: "Litigation involving Pfizer in 2023"
+Output:
+{
+    "technical_keywords": ["pharmaceutical", "drug compound"],
+    "legal_entities": ["Pfizer"],
+    "patent_ids": [],
+    "date_range": {"start": "2023-01-01", "end": "2023-12-31"}
+}
+"""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -107,29 +156,83 @@ The keywords array must contain 3-5 variations. Include CPC codes when relevant.
     response = await extractor_llm.ainvoke(messages)
     content = response.content.strip()
     
-    # Extract JSON from response
-    try:
-        keywords_data = json.loads(content)
-    except json.JSONDecodeError:
-        json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+    parsed = None
+    if content:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+    if parsed is None:
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
-            keywords_data = json.loads(json_match.group())
-        else:
-            # Fallback: use original query
-            keywords_data = {"keywords": [query], "date_range": None}
+            try:
+                parsed = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                parsed = None
+    if parsed is None:
+        parsed = {
+            "technical_keywords": [query],
+            "legal_entities": [],
+            "date_range": None,
+        }
     
-    keywords = keywords_data.get("keywords", [query])
-    if not isinstance(keywords, list) or len(keywords) < 1:
-        keywords = [query]
+    def _clean_terms(items: list, allow_max: int = 7) -> list:
+        seen = set()
+        cleaned = []
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            term = item.strip()
+            if not term:
+                continue
+            low = term.lower()
+            # Drop echoes of the system prompt or boilerplate
+            if any(bad in low for bad in ["you are the queryextractor", "return only a json", "patent + litigation rag system", "system prompt"]):
+                continue
+            if "system" == low:
+                continue
+            # Skip very long phrases (reduce query echoing)
+            if len(term.split()) > 6:
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            cleaned.append(term)
+            if len(cleaned) >= allow_max:
+                break
+        return cleaned
     
-    # Ensure we have 3-5 variations
-    if len(keywords) < 3:
-        # Add some basic variations
-        keywords.extend([f"{query} system", f"{query} method"])
+    technical_keywords = parsed.get("technical_keywords") or []
+    if not isinstance(technical_keywords, list):
+        technical_keywords = []
+    technical_keywords = _clean_terms(technical_keywords, allow_max=7)
+    if len(technical_keywords) < 3:
+        # Derive short fallbacks from the query without echoing full sentence
+        fallback_terms = []
+        words = [w.strip() for w in query.split() if w.strip()]
+        if words:
+            fallback_terms.append(" ".join(words[:3]))
+        fallback_terms.append(f"{query.split()[0]} method" if words else "")
+        technical_keywords.extend(_clean_terms(fallback_terms, allow_max=3))
+    technical_keywords = technical_keywords[:7]
+    
+    legal_entities = parsed.get("legal_entities") or []
+    if not isinstance(legal_entities, list):
+        legal_entities = []
+    legal_entities = _clean_terms(legal_entities, allow_max=7)
+    
+    patent_ids = parsed.get("patent_ids") or []
+    if not isinstance(patent_ids, list):
+        patent_ids = []
+    patent_ids = _clean_terms(patent_ids, allow_max=7)
     
     return {
-        "keywords": keywords[:5],  # Limit to 5
-        "date_range": keywords_data.get("date_range"),
+        "technical_keywords": technical_keywords,
+        "legal_entities": legal_entities,
+        "patent_ids": patent_ids,
+        "date_range": parsed.get("date_range"),
+        # Backward compatibility for downstream consumers that still expect "keywords"
+        "keywords": technical_keywords,
     }
 
 
@@ -141,7 +244,7 @@ async def synthesizer_node(state: Dict[str, Any]) -> AsyncIterator[Dict[str, Any
         print(f"WARNING: Synthesizer received empty or very short query: '{query}'")
     print(f"DEBUG: Synthesizer processing query: '{query[:100]}...'")
     intent = state.get("intent", "UNKNOWN")
-    keywords = state.get("keywords", [])
+    keywords = state.get("technical_keywords") or state.get("keywords") or []
     documents = state.get("documents", [])
     litigation_context = state.get("litigation_context", [])
     feedback = state.get("critique", {}).get("feedback", "") if isinstance(state.get("critique"), dict) else ""
@@ -383,9 +486,31 @@ Unable to provide analysis as no usable patent content was found.
         intent_normalized = "legal"  # Default to legal when both, to include litigation
     
     # Build comprehensive system prompt
-    system_prompt = """SYSTEM:
+    # Add stronger retry instructions when retrying
+    retry_warning = ""
+    if retry_count > 0:
+        retry_warning = f"""
+⚠️⚠️⚠️ CRITICAL: THIS IS RETRY ATTEMPT #{retry_count + 1} ⚠️⚠️⚠️
 
-You receive:
+Your previous response was REJECTED by the quality control system. The previous draft had critical errors that you MUST fix.
+
+MANDATORY RETRY INSTRUCTIONS:
+1. **DO NOT** simply append corrections to the previous draft
+2. **DO NOT** repeat the same mistakes from the previous attempt
+3. **COMPLETELY REWRITE** the response from scratch, addressing ALL feedback points
+4. **ACKNOWLEDGE** the previous failure and demonstrate you understand what went wrong
+5. **BE EXTRA CAREFUL** about citations, grounding, and completeness
+6. **VERIFY** every citation exists in the provided context before including it
+7. **ENSURE** every factual claim is directly supported by the context materials
+
+The critique feedback below lists SPECIFIC issues that caused the rejection. Address EACH point systematically.
+If you fail again, the system will retry up to 3 times total. Make this attempt count.
+
+"""
+    
+    system_prompt = f"""SYSTEM:
+
+{retry_warning}You receive:
 - An INTENT label from an upstream router node: either "technical" or "legal".
 - PATENT MATERIALS: patent claims, specifications, abstracts, cited prior art, related patents.
 - LITIGATION MATERIALS: court decisions, PTAB decisions, oppositions, office actions, litigation summaries.
@@ -417,7 +542,8 @@ In all cases:
 - When you make factual statements, you MUST cite the source as:
   - (Patent: <PATENT_ID>, Claim <N>) or (Patent: <PATENT_ID>, ¶[XXXX])
   - (Case: <CASE_NAME>, p.<page> / §<section>) or (PTAB: <CASE_ID>, §<section>) [LEGAL INTENT ONLY]
-- You do NOT provide legal advice. You provide analytical explanations based on the documents."""
+- You do NOT provide legal advice. You provide analytical explanations based on the documents.
+{retry_warning}"""
 
     # Check if query asks for a specific patent ID
     query_lower = query.lower()
@@ -441,11 +567,29 @@ In all cases:
     feedback_section = ""
     if feedback and retry_count > 0:
         feedback_section = f"""
-CRITIQUE FEEDBACK (from previous attempt - MUST address these issues):
+
+═══════════════════════════════════════════════════════════════
+🚨 RETRY ATTEMPT #{retry_count + 1} - PREVIOUS DRAFT REJECTED 🚨
+═══════════════════════════════════════════════════════════════
+
+CRITIQUE FEEDBACK FROM PREVIOUS ATTEMPT (MUST FIX ALL ISSUES):
 
 {feedback}
 
-IMPORTANT: The previous draft was rejected. You MUST address ALL points mentioned in the critique feedback above. Do not repeat the same mistakes.
+CRITICAL INSTRUCTIONS FOR THIS RETRY:
+1. Read the feedback above CAREFULLY - it lists SPECIFIC errors that caused rejection
+2. COMPLETELY REWRITE your response - do NOT copy/paste from the previous attempt
+3. Address EACH point in the feedback systematically
+4. Double-check ALL citations exist in the provided context before including them
+5. Ensure EVERY factual claim is directly supported by the context materials
+6. Be EXTRA careful about citation format and completeness
+7. If the feedback mentions missing citations, verify those patent IDs are in the context list
+8. If the feedback mentions hallucinations, remove ALL unsupported claims
+9. If the feedback mentions incomplete response, ensure you cover all key findings
+
+REMEMBER: This is attempt #{retry_count + 1} of 3. The system will reject again if you don't fix ALL issues.
+═══════════════════════════════════════════════════════════════
+
 """
     
     user_message_content = f"""INTENT (router output):
@@ -687,39 +831,57 @@ async def critic_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # Extract ONLY the citations that actually appear in the draft
     actual_citations_in_draft = cited_ids.copy()
     
-    system_prompt = """You are a strict quality control grader for patent analysis reports.
-Review the draft response against the source context.
+    system_prompt = """You are a STRICT quality control grader for patent analysis reports.
+Review the draft response against the source context with ZERO tolerance for errors.
 
 CRITICAL: You must ONLY check citations that actually appear in the draft text. Do NOT invent or hallucinate patent IDs.
 
 IMPORTANT: Citations have been programmatically verified. If the verification shows all citations are valid, you should PASS unless there are other serious issues (hallucinations, unsupported claims, etc.).
 
-Perform these checks:
-1. **Hallucination Check:** Is there any claim in the draft NOT supported by the context?
+Perform these STRICT checks:
+1. **Hallucination Check (MANDATORY):** 
+   - Is there ANY claim, fact, or statement in the draft NOT directly supported by the provided context?
+   - Are there any technical details, dates, names, or numbers mentioned that are NOT in the source materials?
+   - FAIL if you find ANY unsupported claims, even minor ones.
+
 2. **Citation Format Check:** Are citations formatted correctly? Acceptable formats:
    - (Patent: <PATENT_ID>, Claim <N>) or (Patent: <PATENT_ID>, ¶[XXXX])
    - (Patent: <PATENT_ID>, Section: <TYPE>, Ref: <REF>) [also valid]
    - [[PatentID]](URL) [legacy format, also acceptable]
    - (Case: <CASE_NAME>, p.<page>) or (PTAB: <CASE_ID>, §<section>) [for legal citations]
-3. **Citation Verification:** Do all cited patent IDs exist in the provided context?
+   - FAIL if citations are missing or incorrectly formatted.
+
+3. **Citation Verification (MANDATORY):** Do ALL cited patent IDs exist in the provided context?
    - NOTE: Patent IDs may appear with underscores (US_123) or dashes (US-123) - both are valid
    - The programmatic verification has already checked this - trust it unless you see obvious errors
+   - FAIL if ANY cited patent ID is not in the context list.
 
-IMPORTANT RULES:
+4. **Completeness Check:**
+   - Does the draft adequately address the user's query?
+   - Are key findings from the context properly summarized?
+   - FAIL if the response is incomplete or misses important information.
+
+5. **Grounding Check (STRICT):**
+   - Every factual statement MUST be traceable to the provided context
+   - No speculation, no assumptions, no general knowledge beyond context
+   - FAIL if the draft contains ungrounded statements.
+
+STRICT RULES:
 - ONLY verify citations that are actually in the draft text
 - Do NOT mention patent IDs that are not in the draft
 - The valid patent IDs from context are: {valid_patent_ids_str}
 - When checking citations, compare them to this exact list
 - If programmatic verification says citations are valid, do NOT reject based on citation format alone
-- Focus on content hallucinations and unsupported claims, not citation format variations
+- Be STRICT about hallucinations - even minor unsupported claims should result in FAIL
+- Be STRICT about completeness - missing key information should result in FAIL
 
 Return ONLY a JSON object with this exact format:
 {{
   "status": "PASS" | "FAIL",
-  "feedback": "Specific instructions on what to fix..."
+  "feedback": "Specific, actionable instructions on what to fix. Be detailed and precise."
 }}
 
-If status is "FAIL", provide detailed, actionable feedback. Do NOT fail for citation format if the patent IDs are correct."""
+If status is "FAIL", provide detailed, actionable feedback with specific examples. Do NOT fail for citation format if the patent IDs are correct, but DO fail for hallucinations, missing citations, or incomplete responses."""
 
     # Build context summary
     context_summary = "\n".join([

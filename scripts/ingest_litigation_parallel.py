@@ -115,7 +115,8 @@ async def ingest_litigation_parallel(jsonl_path: str, source: str, batch_size: i
         for line_num, line in enumerate(f, 1):
             try:
                 data = json.loads(line.strip())
-                if data.get("case_number") and data.get("patent_id"):
+                # Only require case_number - patent_id can be None (many cases don't have patent_id)
+                if data.get("case_number"):
                     all_cases.append(data)
             except json.JSONDecodeError:
                 continue

@@ -13,6 +13,11 @@ class AgentState(TypedDict):
     """State schema for the agent workflow."""
     query: str
     intent: Optional[str]
+    # Technical vs. legal separation
+    technical_keywords: Optional[List[str]]
+    legal_entities: Optional[List[str]]
+    patent_ids: Optional[List[str]]
+    # Backward compatibility; may be unused by downstream nodes
     keywords: Optional[List[str]]
     date_range: Optional[Dict[str, str]]
     documents: Annotated[List[Dict[str, Any]], operator.add]
@@ -48,77 +53,8 @@ async def synthesizer_wrapper(state: AgentState) -> AgentState:
 
 
 async def retrieval_with_enrichment(state: AgentState) -> AgentState:
-    """Retrieval node with document enrichment."""
-    # Run retrieval
-    retrieval_result = await retrieval_node(state)
-    
-    # Enrich documents with metadata
-    documents = retrieval_result.get("documents", [])
-    enriched_docs = await enrich_documents_with_metadata(documents)
-    
-    # Update litigation context based on enriched documents
-    patent_ids = [doc.get("patent_id", "") for doc in enriched_docs if doc.get("patent_id")]
-    litigation_context = retrieval_result.get("litigation_context", [])
-    
-    # If we have patent IDs, fetch additional litigation data
-    if patent_ids and state.get("intent") in ["LEGAL", "BOTH"]:
-        from db.postgres_client import postgres_client
-        try:
-            # Ensure connection is established
-            if not postgres_client.pool:
-                await postgres_client.connect()
-            
-            # Normalize patent IDs for database lookup (handle format variations)
-            # Database might store IDs in different format (with/without dashes, US prefix, etc.)
-            normalized_patent_ids = []
-            for pid in patent_ids:
-                if pid:
-                    # Add original format
-                    normalized_patent_ids.append(pid)
-                    # Add variations: with/without dashes, with/without US prefix
-                    pid_upper = pid.upper()
-                    normalized_patent_ids.append(pid_upper)
-                    normalized_patent_ids.append(pid_upper.replace("-", ""))
-                    normalized_patent_ids.append(pid_upper.replace("/", ""))
-                    if pid_upper.startswith("US"):
-                        normalized_patent_ids.append(pid_upper[2:])
-                        normalized_patent_ids.append(pid_upper[2:].replace("-", ""))
-                    else:
-                        normalized_patent_ids.append(f"US{pid_upper}")
-                        normalized_patent_ids.append(f"US-{pid_upper}")
-            
-            # Remove duplicates
-            unique_patent_ids = list(set([pid for pid in normalized_patent_ids if pid]))
-            
-            # Fetch litigation for all variations
-            additional_litigation = await postgres_client.get_litigation_by_patents(unique_patent_ids)
-            
-            # Also try with just the original patent IDs
-            if not additional_litigation:
-                additional_litigation = await postgres_client.get_litigation_by_patents(patent_ids)
-            
-            # Merge and deduplicate
-            seen_cases = {case.get("case_number", "") for case in litigation_context}
-            for case in additional_litigation:
-                if case.get("case_number", "") not in seen_cases:
-                    litigation_context.append(case)
-                    seen_cases.add(case.get("case_number", ""))
-            
-            # Debug: Log if we found litigation
-            if litigation_context:
-                print(f"DEBUG: Found {len(litigation_context)} litigation case(s) for {len(patent_ids)} patent(s)")
-            else:
-                print(f"DEBUG: No litigation found for {len(patent_ids)} patent(s) (intent: {state.get('intent')})")
-        except Exception as e:
-            # PostgreSQL unavailable - continue without additional litigation data
-            print(f"Warning: Could not fetch additional litigation data: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    return {
-        "documents": enriched_docs,
-        "litigation_context": litigation_context,
-    }
+    """Wrapper that delegates to retrieval_node (fan-out already handled there)."""
+    return await retrieval_node(state)
 
 
 def increment_retry_count(state: AgentState) -> AgentState:

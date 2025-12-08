@@ -7,21 +7,24 @@ from db.postgres_client import postgres_client
 
 async def retrieval_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Retrieve documents using parallel execution of vector search and metadata lookup."""
-    keywords = state.get("keywords", [])
+    technical_keywords = state.get("technical_keywords") or state.get("keywords") or []
+    legal_entities = state.get("legal_entities") or []
+    patent_ids_from_extractor = state.get("patent_ids") or []
     intent = state.get("intent", "BOTH")
     
-    # Extract patent IDs from keywords (if any are patent numbers)
+    # Extract patent IDs from technical keywords (if any look like patent numbers)
     potential_patent_ids = []
-    for keyword in keywords:
-        # Check if keyword looks like a patent number
+    for pid in patent_ids_from_extractor:
+        if pid:
+            potential_patent_ids.append(pid)
+    for keyword in technical_keywords:
         if keyword.startswith("US") or keyword.replace("-", "").replace("US", "").isdigit():
-            # Clean up the patent ID
             clean_id = keyword.replace("CPC:", "").strip()
             if clean_id and not clean_id.startswith("CPC"):
                 potential_patent_ids.append(clean_id)
     
-    # First, get documents from vector search
-    documents = await vector_search(keywords, limit=10)
+    # Vector search only on technical keywords
+    documents = await vector_search(technical_keywords, limit=10)
     
     # Extract patent IDs from retrieved documents
     retrieved_patent_ids = [doc.get("patent_id", "") for doc in documents if doc.get("patent_id")]
@@ -29,9 +32,8 @@ async def retrieval_node(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Parallel execution: enrich documents and get litigation data simultaneously
     enrich_task = enrich_documents_with_metadata(documents)
-    metadata_task = metadata_lookup(keywords, intent, all_patent_ids)
+    metadata_task = metadata_lookup(technical_keywords, legal_entities, intent, all_patent_ids)
     
-    # Wait for both to complete
     enriched_documents, litigation_context = await asyncio.gather(
         enrich_task,
         metadata_task,
@@ -98,26 +100,23 @@ async def vector_search(keywords: List[str], limit: int = 10) -> List[Dict[str, 
 
 
 async def metadata_lookup(
-    keywords: List[str],
+    technical_keywords: List[str],
+    legal_entities: List[str],
     intent: str,
     potential_patent_ids: List[str],
 ) -> List[Dict[str, Any]]:
     """Lookup litigation history and patent metadata from PostgreSQL."""
     litigation_context = []
     
-    # Only fetch litigation if intent is LEGAL or BOTH
     if intent in ["LEGAL", "BOTH"]:
         try:
-            # Ensure connection is established
             if not postgres_client.pool:
                 await postgres_client.connect()
             
-            # First, try to find litigation by patent IDs
             patent_ids_to_check = potential_patent_ids.copy()
             
-            # Also check for patent-like patterns in keywords
-            for keyword in keywords:
-                # Simple heuristic: if keyword contains US and numbers, it might be a patent
+            # Also check for patent-like patterns in technical keywords
+            for keyword in technical_keywords:
                 if "US" in keyword.upper() and any(c.isdigit() for c in keyword):
                     clean = keyword.replace("CPC:", "").strip()
                     if clean not in patent_ids_to_check:
@@ -128,19 +127,34 @@ async def metadata_lookup(
                     patent_ids_to_check
                 )
             
-            # If no litigation found by patent ID, try keyword-based search
-            # This is useful when query asks about litigation topics but retrieved patents don't have cases
+            # If no litigation found by patent ID, try legal-entity keyword search
             if not litigation_context:
-                print(f"DEBUG: No litigation found by patent ID, trying keyword search...")
+                print("DEBUG: No litigation found by patent ID, trying legal entity keyword search...")
+                
+                litigation_keywords = []
+                for ent in legal_entities:
+                    if ent:
+                        litigation_keywords.append(ent.strip())
+                
+                # Fallback to technical keywords only if we have no legal entities
+                if not litigation_keywords:
+                    for kw in technical_keywords:
+                        if kw and not kw.startswith("CPC:"):
+                            litigation_keywords.append(kw.strip())
+                
+                base_hints = ["infringement", "patent", "case", "lawsuit", "defendant", "plaintiff"]
+                for hint in base_hints:
+                    if hint not in " ".join(litigation_keywords).lower():
+                        litigation_keywords.append(hint)
+                
                 keyword_litigation = await postgres_client.search_litigation_by_keywords(
-                    keywords, limit=10
+                    litigation_keywords, limit=10
                 )
                 if keyword_litigation:
                     print(f"DEBUG: Found {len(keyword_litigation)} litigation case(s) by keyword search")
                     litigation_context = keyword_litigation
                     
         except Exception as e:
-            # PostgreSQL unavailable - continue without litigation data
             print(f"Warning: Could not fetch litigation data: {e}")
             import traceback
             traceback.print_exc()

@@ -4,11 +4,42 @@ import json
 import sys
 from pathlib import Path
 from typing import Dict, Any
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.postgres_client import postgres_client
+
+
+def normalize_id(raw_id: Any) -> str | None:
+    """Normalize patent_id for ingestion."""
+    if raw_id is None:
+        return None
+    raw = str(raw_id).strip()
+    if not raw or raw.lower() in ["null", "none", "us-na"]:
+        return None
+    norm = raw.upper().replace("-", "").replace("/", "").replace(" ", "")
+    if not norm:
+        return None
+    if norm.isdigit():
+        norm = f"US{norm}"
+    return norm
+
+
+def normalize_date(raw_date: Any) -> Any:
+    """Convert YYYY-MM-DD strings to date objects; otherwise return None."""
+    if not raw_date:
+        return None
+    try:
+        if isinstance(raw_date, str):
+            return datetime.strptime(raw_date.strip(), "%Y-%m-%d").date()
+        # already a date/datetime?
+        if hasattr(raw_date, "date"):
+            return raw_date.date()
+    except Exception:
+        return None
+    return None
 
 
 async def ingest_litigation(jsonl_path: str, source: str, batch_size: int = 100):
@@ -31,16 +62,13 @@ async def ingest_litigation(jsonl_path: str, source: str, batch_size: int = 100)
                 
                 # Handle patent_id - could be null or string
                 patent_id = data.get("patent_id")
-                if patent_id and patent_id.strip() and patent_id != "null" and patent_id != "US-NA":
-                    patent_id = patent_id.strip()
-                else:
-                    patent_id = None
+                patent_id = normalize_id(patent_id)
                 
                 batch.append({
                     "case_number": case_number,
                     "case_name": data.get("case_name"),
                     "court_name": data.get("court_name"),
-                    "filing_date": data.get("filing_date"),
+                    "filing_date": normalize_date(data.get("filing_date")),
                     "case_status": data.get("case_status"),
                     "plaintiff_name": data.get("plaintiff_name"),
                     "defendant_name": data.get("defendant_name"),

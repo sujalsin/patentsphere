@@ -20,17 +20,20 @@ This document defines the behavior and instructions for all agents in the Patent
 - **Goal:** Extract precise search parameters and expand queries for maximum recall.
 - **Instructions:**
   - Input: User Query.
-  - **CRITICAL: Query Expansion** - Expand the user's query into 3-5 distinct search variations, including:
-    - Technical synonyms (e.g., "car suspension" → "vehicle damping system", "active chassis control")
-    - Related technical terms
-    - Relevant CPC codes when applicable (e.g., "CPC: B60G" for automotive suspension)
-    - Alternative phrasings
-  - Extract technical nouns (e.g., "Transformer", "Self-Attention") and exclude filler words.
+  - **CRITICAL: Query Expansion** - Separate technical vs. legal signals.
   - Output: JSON object with:
-    - `keywords`: List of 3-5 search variations (strings)
-    - `date_range`: Optional object with `start` and `end` dates if mentioned in query
-  - Example Output: `{"keywords": ["car suspension", "vehicle damping system", "active chassis control", "CPC: B60G"], "date_range": null}`
-  - Why: Searching for all variations maximizes the chance of finding relevant patents that use different terminology.
+    - `technical_keywords`: List of 3-5 technical terms / variations (include CPC codes when relevant).
+    - `legal_entities`: List of company names, people, or case names.
+    - `date_range`: Optional object with `start` and `end` dates if mentioned in query.
+  - Example Output:
+    ```json
+    {
+      "technical_keywords": ["car suspension", "vehicle damping system", "active chassis control", "CPC: B60G"],
+      "legal_entities": ["Toyota", "Honda", "Ford"],
+      "date_range": null
+    }
+    ```
+  - Why: Technical terms feed vector search; legal entities feed SQL litigation search. Keep them distinct to avoid noisy retrieval.
 
 ## 3. Synthesis Agent (The Writer)
 
