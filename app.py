@@ -1,15 +1,44 @@
-"""Chainlit frontend for PatentSphere with agent visualization and side panel citations."""
+"""Chainlit frontend for PatentSphere with agent visualization and side panel citations.
+
+Modes
+-----
+• Analysis Mode (default) – original multi-agent Q&A over the patent database.
+  Triggered by any normal chat message.
+
+• Full Draft Mode – 5-step Disclosure-to-Strategic-Patent-Draft wizard.
+  Triggered by typing /draft  OR uploading a file (PDF/TXT/DOCX).
+  Steps:
+    1. Upload & Parse raw disclosure
+    2. Review Decomposed Sections
+    3. Review Strategic Claims
+    4. View Full Specification
+    5. Human-Wall Checklist & Export (.docx / .pdf)
+"""
 import chainlit as cl
 import uuid
 import re
+import os
+import tempfile
 from typing import Dict, Any, List, Optional
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from graph.graph import workflow, AgentState
+from config import settings, get_pipeline_llm
+
+# Lazy import of pipeline to avoid startup errors when deps are missing
+try:
+    from pipeline.orchestrator import run_pipeline_step_by_step
+    from pipeline.exporter import extract_text_from_file, export_to_docx, export_to_pdf
+    from pipeline.models import PipelineState
+    PIPELINE_AVAILABLE = True
+except ImportError as _pipeline_import_err:
+    PIPELINE_AVAILABLE = False
+    print(f"[app] Pipeline not available: {_pipeline_import_err}")
 
 
 def generate_patent_url(patent_id: str) -> str:
@@ -44,17 +73,448 @@ def generate_patent_url(patent_id: str) -> str:
     return f"https://patents.google.com/patent/{clean_id}"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Chat lifecycle
+# ──────────────────────────────────────────────────────────────────────────────
+
 @cl.on_chat_start
 async def start():
     """Welcome message when chat starts."""
+    demo_indicator = ""
+    if settings.groq_api_key:
+        demo_indicator = " *(demo mode: Groq)*"
+    elif settings.demo_mode:
+        demo_indicator = " *(demo mode: local CPU)*"
+
     await cl.Message(
-        content="⚖️ **PatentSphere Ready.** Ask about legal risks or prior art."
+        content=(
+            f"⚖️ **PatentSphere Ready.**{demo_indicator}\n\n"
+            "**Analysis Mode:** Ask about prior art, litigation risk, or specific patents.\n\n"
+            "**Full Draft Mode:** Type `/draft` or upload a PDF/TXT/DOCX file to turn "
+            "a raw inventor disclosure into a complete, attorney-ready patent draft."
+        )
     ).send()
 
+    # Store pipeline state in user session
+    cl.user_session.set("pipeline_state", None)
+    cl.user_session.set("draft_mode", False)
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Message router: /draft  vs. normal analysis
+# ──────────────────────────────────────────────────────────────────────────────
 
 @cl.on_message
 async def main(message: cl.Message):
-    """Handle user messages and run the workflow with visualization."""
+    """Route messages: file upload / /draft → Full Draft Mode; everything else → original analysis."""
+    content = message.content.strip()
+
+    # ── File upload (Chainlit 2.x: files arrive as message.elements) ──────
+    if PIPELINE_AVAILABLE and message.elements:
+        uploaded_files = [
+            el for el in message.elements
+            if hasattr(el, "path") and el.path  # AskFileMessage / uploaded files have a path
+        ]
+        if not uploaded_files:
+            # Also handle cl.File elements by name
+            uploaded_files = [
+                el for el in message.elements
+                if hasattr(el, "name") and el.name and hasattr(el, "content")
+            ]
+
+        if uploaded_files:
+            el = uploaded_files[0]
+            name = getattr(el, "name", "file")
+            # Get file path or write content to temp file
+            file_path = getattr(el, "path", None)
+            if not file_path:
+                # Write content to temp file
+                suffix = Path(name).suffix or ".txt"
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    raw_bytes = getattr(el, "content", b"")
+                    if isinstance(raw_bytes, bytes):
+                        tmp.write(raw_bytes)
+                    else:
+                        tmp.write(raw_bytes.encode("utf-8", errors="ignore"))
+                    file_path = tmp.name
+            cleanup = not bool(getattr(el, "path", None))  # only cleanup temp files we created
+
+            await cl.Message(content=f"📄 Received **{name}** — starting **Full Draft Mode**...").send()
+            try:
+                raw_text = extract_text_from_file(file_path)
+            finally:
+                if cleanup:
+                    try:
+                        os.unlink(file_path)
+                    except Exception:
+                        pass
+
+            if not raw_text.strip() or raw_text.startswith("[PDF text"):
+                await cl.Message(
+                    content="⚠️ Could not extract text. Please paste your disclosure text and type `/draft` first."
+                ).send()
+                return
+
+            await _run_draft_pipeline(raw_text)
+            return
+
+    # ── Human-Wall approval action ─────────────────────────────────────────
+    if content.lower() in ("approve", "approve export", "✅ approve"):
+        state: Optional[PipelineState] = cl.user_session.get("pipeline_state")
+        if state and state.checklist and not state.checklist.export_allowed:
+            await _handle_human_wall_approval(state)
+            return
+
+    # ── Full Draft Mode trigger ───────────────────────────────────────────
+    if PIPELINE_AVAILABLE and (content.lower().startswith("/draft") or cl.user_session.get("draft_mode")):
+        remaining = content[6:].strip() if content.lower().startswith("/draft") else content
+        if remaining:
+            cl.user_session.set("draft_mode", False)
+            await _run_draft_pipeline(remaining)
+        else:
+            # No text after /draft – ask user to paste or upload
+            cl.user_session.set("draft_mode", True)
+            await cl.Message(
+                content=(
+                    "📝 **Full Draft Mode activated.**\n\n"
+                    "Please paste your raw inventor disclosure below, or upload a **.pdf / .txt / .docx** file.\n\n"
+                    "*Your disclosure can be messy notes, email text, slide bullet points, or a transcript — "
+                    "the pipeline will clean it up.*"
+                )
+            ).send()
+        return
+
+    # ── Original analysis mode (untouched) ───────────────────────────────
+    await _original_analysis(message)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Full Draft Mode – 5-step wizard
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _run_draft_pipeline(raw_text: str) -> None:
+    """Execute the 5-step pipeline and stream each step to the Chainlit UI."""
+    if not PIPELINE_AVAILABLE:
+        await cl.Message(content="⚠️ Pipeline unavailable. Install requirements: `pip install -r requirements.txt`").send()
+        return
+
+    # Determine LLM (demo-mode toggle)
+    llm = get_pipeline_llm(role="synthesizer")
+    score_llm = get_pipeline_llm(role="critic")
+    tenant_id = settings.default_tenant_id  # ENTERPRISE BRIDGE
+
+    # Step progress tracker
+    step_msgs: Dict[str, cl.Message] = {}
+
+    async def _step_header(step_num: int, label: str, key: str) -> cl.Message:
+        m = cl.Message(content=f"**Step {step_num}/5 — {label}** ⏳")
+        await m.send()
+        step_msgs[key] = m
+        return m
+
+    async def _step_done(key: str, summary: str) -> None:
+        if key in step_msgs:
+            step_msgs[key].content = f"✅ {summary}"
+            await step_msgs[key].update()
+
+    # ── Step 1: Decompose ────────────────────────────────────────────────
+    await _step_header(1, "Decomposing Disclosure into Sections", "decompose")
+
+    last_state: Optional[PipelineState] = None
+    step_num = 0
+    step_names = ["decompose", "analyze", "draft_claims", "generate_spec", "review"]
+    step_labels = [
+        "Decomposing Disclosure",
+        "Parallel Prior-Art Analysis",
+        "Drafting Strategic Claims",
+        "Generating Full Specification",
+        "Human-Wall Review",
+    ]
+
+    gen = run_pipeline_step_by_step(
+        raw_input=raw_text,
+        llm=llm,
+        workflow=workflow,
+        score_llm=score_llm,
+        tenant_id=tenant_id,
+    )
+
+    async for state in gen:
+        last_state = state
+
+        # Check for failure
+        if state.failed_at_step:
+            failed_key = step_names[step_num] if step_num < len(step_names) else "unknown"
+            if failed_key in step_msgs:
+                step_msgs[failed_key].content = f"❌ Step {step_num + 1} failed: {state.failed_at_step}"
+                await step_msgs[failed_key].update()
+            await cl.Message(
+                content=(
+                    f"⚠️ **Pipeline stopped at step: `{state.failed_at_step}`.**\n\n"
+                    f"Check the audit log below for details.\n\n"
+                    f"```\n"
+                    + "\n".join(
+                        f"[{e.step}] {e.status}: {e.detail or ''}"
+                        for e in state.audit_log[-5:]
+                    )
+                    + "\n```"
+                )
+            ).send()
+            cl.user_session.set("pipeline_state", state)
+            return
+
+        # Step complete – update UI
+        sn = step_names[step_num] if step_num < len(step_names) else ""
+        sl = step_labels[step_num] if step_num < len(step_labels) else ""
+
+        if step_num == 0 and state.decomposition:  # Decompose done
+            await _step_done("decompose", f"**{sl}** — {len(state.decomposition.sections)} sections extracted")
+            await _show_decomposition(state)
+            if step_num + 1 < len(step_names):
+                await _step_header(step_num + 2, step_labels[step_num + 1], step_names[step_num + 1])
+
+        elif step_num == 1 and state.analyses:  # Analyze done
+            await _step_done(sn, f"**{sl}** — {len(state.analyses)} sections analyzed")
+            await _show_analysis_summary(state)
+            if step_num + 1 < len(step_names):
+                await _step_header(step_num + 2, step_labels[step_num + 1], step_names[step_num + 1])
+
+        elif step_num == 2 and state.claim_set:  # Claims done
+            await _step_done(sn, f"**{sl}** — {len(state.claim_set.claims)} claims drafted")
+            await _show_claims(state)
+            if step_num + 1 < len(step_names):
+                await _step_header(step_num + 2, step_labels[step_num + 1], step_names[step_num + 1])
+
+        elif step_num == 3 and state.specification:  # Spec done
+            await _step_done(sn, f"**{sl}** — ~{state.specification.word_count()} words")
+            await _show_specification(state)
+            if step_num + 1 < len(step_names):
+                await _step_header(step_num + 2, step_labels[step_num + 1], step_names[step_num + 1])
+
+        elif step_num == 4 and state.checklist:  # Review done
+            await _step_done(sn, f"**{sl}** — confidence: {state.checklist.overall_confidence:.0%}, flags: {len(state.checklist.flags)}")
+            await _show_checklist(state)
+
+        step_num += 1
+
+    if last_state:
+        cl.user_session.set("pipeline_state", last_state)
+        cl.user_session.set("draft_mode", False)
+
+
+# ── Step display helpers ───────────────────────────────────────────────────────
+
+async def _show_decomposition(state: PipelineState) -> None:
+    """Render decomposed sections as formatted markdown."""
+    disclosure = state.decomposition
+    lines = ["### 📋 Decomposed Disclosure Sections\n"]
+    lines.append("| Section | Confidence | Words | Excerpt |")
+    lines.append("|---------|-----------|-------|---------|")
+    for sec in disclosure.sections:
+        excerpt = sec.provenance.excerpt[:50].replace("|", "I").replace("\n", " ")
+        lines.append(
+            f"| **{sec.section_name.value}** "
+            f"| {sec.confidence:.0%} "
+            f"| {sec.word_count} "
+            f"| *{excerpt}...* |"
+        )
+    await cl.Message(content="\n".join(lines)).send()
+
+    # Show full section text as expandable elements
+    elements = []
+    for sec in disclosure.sections:
+        elements.append(cl.Text(
+            name=sec.section_name.value,
+            content=(
+                f"**Section:** {sec.section_name.value}\n"
+                f"**Confidence:** {sec.confidence:.0%}\n"
+                f"**Provenance:** chars {sec.provenance.char_start}–{sec.provenance.char_end}\n"
+                f"---\n{sec.text}"
+            ),
+            display="side",
+        ))
+
+    sections_msg = cl.Message(
+        content="*Click any section name to read the cleaned text →* "
+                + " | ".join(f"[[{s.section_name.value}]]" for s in disclosure.sections)
+    )
+    sections_msg.elements = elements
+    await sections_msg.send()
+
+
+async def _show_analysis_summary(state: PipelineState) -> None:
+    """Render analysis scores as a risk table."""
+    lines = ["### 🔬 Prior-Art & Risk Analysis\n"]
+    lines.append("| Section | Novelty ↑ | Obviousness Risk ↓ | Litigation Risk ↓ | Prior Art Hits |")
+    lines.append("|---------|-----------|-------------------|-----------------|---------------|")
+    for a in state.analyses:
+        n_bar = "🟢" if a.novelty_score > 0.6 else ("🟡" if a.novelty_score > 0.4 else "🔴")
+        o_bar = "🔴" if a.obviousness_risk > 0.6 else ("🟡" if a.obviousness_risk > 0.4 else "🟢")
+        l_bar = "🔴" if a.litigation_risk > 0.6 else ("🟡" if a.litigation_risk > 0.4 else "🟢")
+        lines.append(
+            f"| {a.section_name.value} "
+            f"| {n_bar} {a.novelty_score:.2f} "
+            f"| {o_bar} {a.obviousness_risk:.2f} "
+            f"| {l_bar} {a.litigation_risk:.2f} "
+            f"| {len(a.prior_art_hits)} |"
+        )
+    await cl.Message(content="\n".join(lines)).send()
+
+
+async def _show_claims(state: PipelineState) -> None:
+    """Render the strategic claims with reasoning."""
+    lines = ["### ⚖️ Strategic Patent Claims\n"]
+    for claim in state.claim_set.claims:
+        dep_str = f" *(depends on claim {claim.depends_on})*" if claim.depends_on else " *(independent)*"
+        breadth_bar = "█" * int(claim.breadth_score * 10) + "░" * (10 - int(claim.breadth_score * 10))
+        lines.append(f"**Claim {claim.claim_number}**{dep_str} — Breadth: `{breadth_bar}` {claim.breadth_score:.2f}")
+        lines.append(f"> {claim.text}\n")
+        lines.append(f"💡 *Strategy:* {claim.strategy_reasoning}\n")
+        lines.append("---")
+    await cl.Message(content="\n".join(lines)).send()
+
+
+async def _show_specification(state: PipelineState) -> None:
+    """Render the full specification in structured markdown."""
+    spec = state.specification
+    content = f"""### 📄 Full Patent Specification Draft
+
+**Title:** {spec.title}
+
+**Word Count:** ~{spec.word_count()} words · **Generated:** {spec.generation_timestamp.strftime('%Y-%m-%d %H:%M UTC')}
+
+---
+
+#### Abstract
+{spec.abstract}
+
+#### Background
+{spec.background}
+
+#### Summary of the Invention
+{spec.summary_of_invention}
+
+#### Detailed Description
+{spec.detailed_description}
+
+#### Claims
+"""
+    for claim in spec.claims:
+        dep = f" (depends on claim {claim.depends_on})" if claim.depends_on else ""
+        content += f"\n**{claim.claim_number}.{dep}** {claim.text}\n"
+
+    spec_element = cl.Text(
+        name="full_specification",
+        content=content,
+        display="side",
+    )
+    msg = cl.Message(
+        content="📄 Full specification generated! Click to read → [[full_specification]]\n\n"
+                f"*Title: **{spec.title}***"
+    )
+    msg.elements = [spec_element]
+    await msg.send()
+
+
+async def _show_checklist(state: PipelineState) -> None:
+    """Render Human-Wall Checklist and export controls."""
+    checklist = state.checklist
+    conf_pct = f"{checklist.overall_confidence:.0%}"
+    conf_icon = "🟢" if checklist.overall_confidence > 0.7 else ("🟡" if checklist.overall_confidence > 0.5 else "🔴")
+
+    lines = [
+        f"### 🧱 Human-Wall Checklist\n",
+        f"{conf_icon} **Overall Confidence:** {conf_pct}  |  "
+        f"🚩 **Flags:** HIGH={checklist.high_severity_count} "
+        f"MEDIUM={checklist.medium_severity_count} "
+        f"LOW={checklist.low_severity_count}",
+        f"\n*{checklist.reviewer_notes}*\n",
+    ]
+
+    # Per-section scores table
+    lines.append("#### Section Confidence Scores")
+    lines.append("| Section | Confidence |")
+    lines.append("|---------|-----------|")
+    for s in checklist.section_scores:
+        icon = "🟢" if s.confidence > 0.7 else ("🟡" if s.confidence > 0.5 else "🔴")
+        lines.append(f"| {s.section} | {icon} {s.confidence:.0%} |")
+
+    # Flags
+    if checklist.flags:
+        lines.append("\n#### ⚠️ Flags for Attorney Attention")
+        for flag in checklist.flags:
+            sev_icon = {"high": "🔴", "medium": "🟡", "low": "🔵"}.get(flag.severity, "⚪")
+            lines.append(
+                f"\n{sev_icon} **[{flag.severity.upper()}] {flag.section}** — {flag.issue}\n"
+                f"   *Suggestion:* {flag.suggestion}"
+            )
+
+    lines.append("\n---")
+    lines.append(
+        "\n✅ **Ready to approve?** Type `approve` to unlock export.\n"
+        "🔒 *Export is locked until you approve this draft.*"
+    )
+
+    await cl.Message(content="\n".join(lines)).send()
+
+
+async def _handle_human_wall_approval(state: PipelineState) -> None:
+    """Handle user approval at the Human-Wall checkpoint and offer exports."""
+    import tempfile, os
+
+    approved_checklist = state.checklist.approve()
+    state = state.model_copy(update={"checklist": approved_checklist})
+    cl.user_session.set("pipeline_state", state)
+
+    await cl.Message(
+        content="✅ **Human-Wall Approved!** Generating export files..."
+    ).send()
+
+    spec = state.specification
+    session_id = state.session_id
+    export_dir = tempfile.mkdtemp(prefix="patentsphere_export_")
+
+    elements = []
+    messages = []
+
+    # DOCX export
+    try:
+        docx_path = os.path.join(export_dir, f"patent_draft_{session_id[:8]}.docx")
+        export_to_docx(spec, approved_checklist, docx_path, session_id=session_id)
+        elements.append(cl.File(path=docx_path, name=f"patent_draft_{session_id[:8]}.docx", display="inline"))
+        messages.append(f"📄 **DOCX:** `patent_draft_{session_id[:8]}.docx`")
+    except Exception as e:
+        messages.append(f"⚠️ DOCX export failed: {e}")
+
+    # PDF export
+    try:
+        pdf_path = os.path.join(export_dir, f"patent_draft_{session_id[:8]}.pdf")
+        export_to_pdf(spec, approved_checklist, pdf_path, session_id=session_id)
+        elements.append(cl.File(path=pdf_path, name=f"patent_draft_{session_id[:8]}.pdf", display="inline"))
+        messages.append(f"📋 **PDF:** `patent_draft_{session_id[:8]}.pdf` (with ✅ Human-Wall Approved stamp)")
+    except Exception as e:
+        messages.append(f"⚠️ PDF export failed: {e}")
+
+    export_msg = cl.Message(
+        content=(
+            "### 📦 Export Complete\n\n"
+            + "\n".join(messages)
+            + "\n\n*Every exported file includes a Provenance Appendix tracing each "
+              "section back to the original inventor disclosure.*"
+        )
+    )
+    export_msg.elements = elements
+    await export_msg.send()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Original analysis mode (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _original_analysis(message: cl.Message) -> None:
+    """Original PatentSphere analysis flow — untouched from baseline."""
+    # (Renamed from main() to _original_analysis() for routing; logic is identical)
     # Initialize state with user query
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}

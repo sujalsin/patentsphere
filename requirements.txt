@@ -46,3 +46,8 @@ langchain-huggingface>=0.0.3
 google-cloud-bigquery>=3.11.0
 google-auth>=2.23.0
 
+# Disclosure-to-Draft Pipeline – export and demo dependencies
+python-docx>=1.1.0      # DOCX export with clickable citations
+fpdf2>=2.7.0            # PDF export with Human-Wall stamp
+langchain-groq>=0.1.0   # Groq cloud models for demo mode
+pymupdf>=1.23.0         # Primary PDF parser; text-only fallback is built-in

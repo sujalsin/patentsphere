@@ -1,3 +1,99 @@
+# PatentSphere
+
+> **Turn a raw inventor disclosure into a complete, attorney-ready patent draft in minutes — with full traceability, verifiable citations, and a Human-Wall approval checkpoint before export.**
+
+---
+
+## 🚀 What's New: Disclosure-to-Strategic-Patent-Draft Pipeline
+
+PatentSphere now ships with a **hybrid dual-mode architecture**:
+
+| Mode | What it does |
+|------|-------------|
+| **Analysis Mode** (original) | Q&A over your patent database — prior art, litigation risk, claim analysis |
+| **Full Draft Mode** (new) | Raw disclosure → complete patent specification in 5 steps |
+
+### 5-Step Wizard Flow
+
+```
+Upload Raw Disclosure
+        │
+        ▼
+Step 1 ─ Decompose      Split messy input into 7 clean sections with provenance + confidence scores
+        │
+        ▼
+Step 2 ─ Analyze        Parallel RAG + RLAIF on every section → novelty, obviousness & litigation risk
+        │
+        ▼
+Step 3 ─ Draft Claims   1 broad independent claim (market-protecting) + 3-5 layered dependent claims
+        │                Each claim ships with plain-English strategy reasoning
+        ▼
+Step 4 ─ Full Spec      Complete title, abstract, background, summary, detailed description & claims
+        │
+        ▼
+Step 5 ─ Human-Wall     Multi-critic review: per-section confidence scores, attorney flags, severity ratings
+                        Export is LOCKED until you type "approve"
+                        → DOCX (clickable citations) + PDF (Human-Wall Approved stamp)
+```
+
+### How to Trigger Full Draft Mode
+
+```
+# Option 1: type /draft in chat, then paste your disclosure
+/draft
+
+# Option 2: paste disclosure text directly after the command
+/draft My invention is a neural network that predicts patent validity...
+
+# Option 3: upload a PDF, TXT, or DOCX file — wizard starts automatically
+```
+
+### Demo Mode Toggle
+
+PatentSphere selects the LLM automatically based on your environment:
+
+| Environment | LLM Used | Notes |
+|------------|----------|-------|
+| `GROQ_API_KEY` set in `.env` | Groq `llama-3.1-8b-instant` | Fastest — ideal for public demos |
+| No Groq key, `DEMO_MODE=true` | Ollama `llama3.2:3b` | Strong local CPU fallback |
+| Default (nothing set) | Per-agent Ollama models | Privacy-first — fully local |
+
+```bash
+# .env — enable demo mode
+GROQ_API_KEY=gsk_...         # Groq demo mode (fastest)
+# or
+DEMO_MODE=true               # Strong local CPU fallback (llama3.2:3b)
+```
+
+### Privacy-First Design
+
+- **Default**: 100% local (Ollama + Qdrant + PostgreSQL). No data leaves your machine.
+- **Demo mode**: Groq is opt-in via explicit `GROQ_API_KEY`. The key is never logged.
+- **Audit log**: Every pipeline run produces an append-only audit trail tracing each output back to the original input.
+
+### Enterprise Bridge Architecture
+
+The system is architected for the path from MVP to enterprise:
+
+```
+Current (single-user / MVP)           Future Enterprise Bridge
+────────────────────────────────      ──────────────────────────────────────────
+Single Qdrant collection: patents     Per-tenant: {tenant_id}_patents
+Single audit log                      Per-tenant audit log partitioning
+File-based export                     S3 / Azure Blob with tenant isolation
+No auth layer                         JWT → tenant_id → collection routing
+```
+
+`tenant_id` is already threaded through `AgentState`, all pipeline models, and Qdrant search calls — marked with `# ENTERPRISE BRIDGE` comments throughout the codebase. Activating full multi-tenancy requires changing one line per search call.
+
+**Future heterogeneous source integrations** (bridge targets):
+- University OTT / IP portal systems
+- Corporate invention disclosure management (IDM) platforms
+- USPTO, EPO, and WIPO bulk data feeds
+- Law firm docketing and prosecution management systems
+
+---
+
 # PatentSphere - Self-Correcting Patent Analysis System
 
 A production-grade multi-agent RAG system with RLAIF (Reinforcement Learning from AI Feedback) self-correction for patent analysis. The system synthesizes multi-modal data (text + graph + temporal metadata) with high precision and provides verifiable citations for every claim.

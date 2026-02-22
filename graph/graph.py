@@ -26,6 +26,11 @@ class AgentState(TypedDict):
     critique: Optional[Dict[str, Any]]
     retry_count: int
     final_response: Optional[str]
+    # ENTERPRISE BRIDGE: tenant_id enables future per-tenant Qdrant collection routing.
+    #   Usage: route vector search to collection f"{tenant_id}_patents" instead of
+    #   the global 'patents' collection, achieving data isolation per client.
+    #   Set by the pipeline orchestrator; None = global shared collection (default).
+    tenant_id: Optional[str]
 
 
 def should_retry(state: AgentState) -> str:
