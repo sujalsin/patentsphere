@@ -29,9 +29,9 @@ Step 3 ─ Draft Claims   1 broad independent claim (market-protecting) + 3-5 la
         │                Each claim ships with plain-English strategy reasoning
         ▼
 Step 4 ─ Full Spec      Complete title, abstract, background, summary, detailed description & claims
-        │
+        │                ✨ Includes Prior Art Navigation Sidebar & 2x2 Competitive Positioning Map
         ▼
-Step 5 ─ Human-Wall     Multi-critic review: per-section confidence scores, attorney flags, severity ratings
+Step 5 ─ Human-Wall     Multi-critic review: per-section confidence scores, attorney flags, specific risk mitigation strategies
                         Export is LOCKED until you type "approve"
                         → DOCX (clickable citations) + PDF (Human-Wall Approved stamp)
 ```
@@ -98,7 +98,12 @@ No auth layer                         JWT → tenant_id → collection routing
 
 A production-grade multi-agent RAG system with RLAIF (Reinforcement Learning from AI Feedback) self-correction for patent analysis. The system synthesizes multi-modal data (text + graph + temporal metadata) with high precision and provides verifiable citations for every claim.
 
-## Features
+### Advanced Strategic Features (Wow Factor)
+- **Competitive Positioning Map**: Automatically generates a 2x2 matrix placing the drafted invention against retrieved prior art competitors (e.g., Privacy vs. Clinical Integration).
+- **Prior Art Navigation**: Actively maps specific drafted claim limitations to identified gaps in the prior art.
+- **Resilient Human-Wall Review**: Unlike basic RLAIF critics that collapse on high-risk inventions, PatentSphere's reviewer forces structured claim-drafting strategies and specific prior art distinctions, avoiding "manual review" dead ends.
+
+## Core Capabilities
 
 - Hybrid Search: Combines dense (semantic) and sparse (keyword) vectors for optimal retrieval
 - Multi-Agent Architecture: 4 specialized agents (Router, Extractor, Synthesizer, Critic)

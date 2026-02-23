@@ -192,6 +192,12 @@ class DraftSpecification(BaseModel):
         ..., description="Full embodiment description with figure references"
     )
     claims: List[PatentClaim] = Field(default_factory=list)
+    competitive_positioning_map: str = Field(
+        default="", description="2x2 Markdown table showing competitive positioning"
+    )
+    prior_art_navigation: str = Field(
+        default="", description="Markdown section mapping claim limitations to prior art gaps"
+    )
     # Provenance: maps each top-level field to originating section analyses
     provenance_map: Dict[str, List[str]] = Field(
         default_factory=dict,

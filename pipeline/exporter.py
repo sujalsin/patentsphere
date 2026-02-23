@@ -194,6 +194,14 @@ def export_to_docx(
     _add_heading(doc, "DETAILED DESCRIPTION", level=1)
     doc.add_paragraph(spec.detailed_description)
 
+    if getattr(spec, "prior_art_navigation", None):
+        _add_heading(doc, "PRIOR ART NAVIGATION STRATEGY", level=1)
+        doc.add_paragraph(spec.prior_art_navigation)
+        
+    if getattr(spec, "competitive_positioning_map", None):
+        _add_heading(doc, "COMPETITIVE POSITIONING MAP", level=1)
+        doc.add_paragraph(spec.competitive_positioning_map)
+
     _add_heading(doc, "CLAIMS", level=1)
     for claim in spec.claims:
         dep = f" (depends on claim {claim.depends_on})" if claim.depends_on else ""
@@ -324,6 +332,12 @@ def export_to_pdf(
     _pdf_section(pdf, "BACKGROUND", spec.background)
     _pdf_section(pdf, "SUMMARY OF THE INVENTION", spec.summary_of_invention)
     _pdf_section(pdf, "DETAILED DESCRIPTION", spec.detailed_description)
+
+    if getattr(spec, "prior_art_navigation", None):
+        _pdf_section(pdf, "PRIOR ART NAVIGATION STRATEGY", spec.prior_art_navigation)
+
+    if getattr(spec, "competitive_positioning_map", None):
+        _pdf_section(pdf, "COMPETITIVE POSITIONING MAP", spec.competitive_positioning_map)
 
     _pdf_heading(pdf, "CLAIMS")
     for claim in spec.claims:

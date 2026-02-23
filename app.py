@@ -397,9 +397,15 @@ async def _show_specification(state: PipelineState) -> None:
 
 #### Detailed Description
 {spec.detailed_description}
-
-#### Claims
 """
+
+    if getattr(spec, "prior_art_navigation", None):
+        content += f"\n#### Prior Art Navigation Strategy\n{spec.prior_art_navigation}\n"
+    
+    if getattr(spec, "competitive_positioning_map", None):
+        content += f"\n#### Competitive Positioning Map\n{spec.competitive_positioning_map}\n"
+
+    content += "\n#### Claims\n"
     for claim in spec.claims:
         dep = f" (depends on claim {claim.depends_on})" if claim.depends_on else ""
         content += f"\n**{claim.claim_number}.{dep}** {claim.text}\n"
